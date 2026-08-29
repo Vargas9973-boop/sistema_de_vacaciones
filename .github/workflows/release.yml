@@ -13,7 +13,10 @@ permissions:
 
 jobs:
   build-and-release:
-    runs-on: windows-latest
+    # Fijado a windows-2022 (no windows-latest): la imagen más nueva trae Visual
+    # Studio 2026, que node-gyp todavía no reconoce al compilar better-sqlite3
+    # ("could not find a version of Visual Studio 2017 or newer to use").
+    runs-on: windows-2022
     steps:
       - name: Descargar código
         uses: actions/checkout@v4
