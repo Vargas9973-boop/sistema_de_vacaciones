@@ -68,6 +68,15 @@ contextBridge.exposeInMainWorld('api', {
         ipcRenderer.invoke('empleados:abrir-pdf-contrato', rutaPdf),
 
     // ============================================================================
+    // EXPEDIENTE DIGITAL: documentos adjuntos por empleado
+    // ============================================================================
+    obtenerCatalogoDocumentos: () => ipcRenderer.invoke('documentos:catalogo-tipos'),
+    listarDocumentosEmpleado: (empleadoId) => ipcRenderer.invoke('documentos:listar', empleadoId),
+    subirDocumentoEmpleado: (payload) => ipcRenderer.invoke('documentos:subir', payload),
+    abrirDocumentoEmpleado: (documentoId) => ipcRenderer.invoke('documentos:abrir', documentoId),
+    eliminarDocumentoEmpleado: (documentoId) => ipcRenderer.invoke('documentos:eliminar', documentoId),
+
+    // ============================================================================
     // MÓDULO 2: GESTIÓN DE VACACIONES
     // ============================================================================
     obtenerRemanenteVacacionesFiniquito: (empleadoId, fechaConsulta) => ipcRenderer.invoke('vacaciones:obtener-remanente-finiquito', {empleadoId, fechaConsulta}),

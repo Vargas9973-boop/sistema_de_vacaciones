@@ -1689,6 +1689,7 @@ window.editarEmpleadoV22 = async function(empleadoId) {
         set('expFechaContrato', emp.fecha_contrato);
         set('expFechaVencimientoContrato', emp.fecha_vencimiento_contrato);
         set('expEdad', emp.edad);
+        set('expFechaNacimiento', emp.fecha_nacimiento);
         set('expRFC', emp.rfc);
         set('expNSS', emp.nss);
         set('expSalarioDiario', emp.salario_diario);
@@ -1892,6 +1893,7 @@ function configurarFormularioEmpleado() {
             puesto: document.getElementById('expPuesto')?.value.trim() || '',
             fecha_ingreso: document.getElementById('expFechaIngreso')?.value || '',
             edad: Number(inputEdad?.value || 0) || null,
+            fecha_nacimiento: document.getElementById('expFechaNacimiento')?.value || '',
             fecha_contrato: document.getElementById('expFechaContrato')?.value || '',
             fecha_vencimiento_contrato: document.getElementById('expFechaVencimientoContrato')?.value || '',
             rfc: rfcCapturado,
@@ -3295,14 +3297,37 @@ async function cargarDashboardProfesional(){
         const leyOto=document.getElementById('panoramaLeyOtorgados');
         if(leyOto) leyOto.textContent=otorgados;
 
+        const hoy=new Date(); hoy.setHours(0,0,0,0);
+
+        // Contratos por vencer/vencidos: reutiliza el mismo cálculo que el módulo de Contratos.
+        let resumenContratos=null;
+        try{
+            const rc=await window.api.obtenerResumenContratos(window.empresaSeleccionadaId||null);
+            if(rc?.ok) resumenContratos=rc.resumen;
+        }catch(_){ /* no bloquea el resto del panorama laboral */ }
+
+        // Cumpleaños en los próximos 30 días, a partir de fecha_nacimiento.
+        const cumpleanosProximos=(d.proximos||[]).map(e=>{
+            if(!e.fecha_nacimiento) return null;
+            const fn=new Date(`${e.fecha_nacimiento}T00:00:00`);
+            if(isNaN(fn.getTime())) return null;
+            let prox=new Date(hoy.getFullYear(),fn.getMonth(),fn.getDate());
+            if(prox<hoy) prox=new Date(hoy.getFullYear()+1,fn.getMonth(),fn.getDate());
+            const dias=Math.round((prox-hoy)/86400000);
+            return dias<=30?{...e,_dias:dias}:null;
+        }).filter(Boolean).sort((a,b)=>a._dias-b._dias);
+
         const alertas=[];
         if(pendientes>0)alertas.push(`<div class="alert-item"><i class="fa-solid fa-clock"></i><strong>${pendientes}</strong> solicitud(es) pendiente(s) de revisión.</div>`);
+        if(resumenContratos?.vencidos>0)alertas.push(`<div class="alert-item"><i class="fa-solid fa-file-circle-xmark"></i> <strong>${resumenContratos.vencidos}</strong> contrato(s) vencido(s).</div>`);
+        if(resumenContratos?.porVencer>0)alertas.push(`<div class="alert-item"><i class="fa-solid fa-file-contract"></i> <strong>${resumenContratos.porVencer}</strong> contrato(s) por vencer en los próximos 60 días.</div>`);
+        if(cumpleanosProximos.length)alertas.push(`<div class="alert-item"><i class="fa-solid fa-cake-candles"></i> <strong>${cumpleanosProximos.length}</strong> cumpleaños en los próximos 30 días: ${cumpleanosProximos.slice(0,3).map(e=>escapeHtml(`${e.nombre||''} ${e.apellido||''}`.trim())).join(', ')}${cumpleanosProximos.length>3?` y ${cumpleanosProximos.length-3} más`:''}.</div>`);
+        if(Number(d.expedientesIncompletos||0)>0)alertas.push(`<div class="alert-item"><i class="fa-solid fa-folder-open"></i> <strong>${d.expedientesIncompletos}</strong> expediente(s) con documentos obligatorios faltantes.</div>`);
         if(disponibles>0)alertas.push(`<div class="alert-item"><i class="fa-solid fa-umbrella-beach"></i> Hay <strong>${disponibles}</strong> días disponibles en la plantilla.</div>`);
         if(!alertas.length)alertas.push('<div class="alert-item"><i class="fa-solid fa-circle-check"></i> No hay alertas críticas pendientes.</div>');
         document.getElementById('dashAlertas').innerHTML=alertas.join('');
 
         // Línea de tiempo: calcula el próximo aniversario laboral de cada colaborador y ordena por cercanía.
-        const hoy=new Date(); hoy.setHours(0,0,0,0);
         const conAniversario=(d.proximos||[]).map(e=>{
             const fi=e.fecha_ingreso?new Date(`${e.fecha_ingreso}T00:00:00`):null;
             let dias=null, aniosCumplidos=null;
@@ -3313,7 +3338,7 @@ async function cargarDashboardProfesional(){
                 aniosCumplidos=prox.getFullYear()-fi.getFullYear();
             }
             return {...e,_dias:dias,_anios:aniosCumplidos};
-        }).sort((a,b)=>(a._dias??9999)-(b._dias??9999));
+        }).sort((a,b)=>(a._dias??9999)-(b._dias??9999)).slice(0,8);
 
         document.getElementById('dashProximos').innerHTML=conAniversario.map(e=>{
             const nombreCompleto=`${e.nombre||''} ${e.apellido||''}`.trim();
@@ -3629,6 +3654,7 @@ async function mostrarPerfilProfesional(emp){
           <div class="profile-box"><span>Nombre completo</span><strong>${escapeHtml(`${emp.nombre||''} ${emp.apellido||''}`.trim())}</strong></div>
           <div class="profile-box"><span>Empresa</span><strong>${escapeHtml(emp.empresa_nombre||'')}</strong></div>
           <div class="profile-box"><span>Edad</span><strong>${emp.edad != null && emp.edad !== '' ? escapeHtml(emp.edad) + ' años' : 'No capturada'}</strong></div>
+          <div class="profile-box"><span>Fecha de nacimiento</span><strong>${escapeHtml(emp.fecha_nacimiento||'No capturada')}</strong></div>
           <div class="profile-box"><span>RFC</span><strong>${escapeHtml(emp.rfc||'No capturado')}</strong></div>
           <div class="profile-box"><span>CURP</span><strong>${escapeHtml(emp.curp||'No capturada')}</strong></div>
           <div class="profile-box"><span>NSS (alta IMSS)</span><strong>${escapeHtml(emp.nss||'No capturado')}</strong></div>
@@ -3650,7 +3676,77 @@ async function mostrarPerfilProfesional(emp){
               : '<strong>No asociado</strong>'}
           </div>
         </div>
+        <h4 style="margin:16px 0 6px;color:#64748b;font-size:.85rem;text-transform:uppercase;">Documentos del expediente</h4>
+        <div id="perfilDocumentosLista">Cargando documentos...</div>
       </div>`;
+    cargarDocumentosPerfil(emp.id);
+}
+
+// Expediente digital: checklist de documentos por empleado (ver/agregar/eliminar).
+// Los primeros DOCUMENTOS_REQUERIDOS_EXPEDIENTE (main.js) se marcan como obligatorios.
+async function cargarDocumentosPerfil(empleadoId){
+    const cont=document.getElementById('perfilDocumentosLista');
+    if(!cont) return;
+    try{
+        const [rCatalogo,rLista]=await Promise.all([
+            window.api.obtenerCatalogoDocumentos(),
+            window.api.listarDocumentosEmpleado(empleadoId)
+        ]);
+        if(!rCatalogo?.ok) throw new Error(rCatalogo?.error||'No se pudo cargar el catálogo de documentos.');
+        const catalogo=rCatalogo.data||{};
+        const requeridos=new Set(rCatalogo.requeridos||[]);
+        const documentos=normalizarArreglo(rLista);
+
+        cont.innerHTML=Object.entries(catalogo).map(([clave,etiqueta])=>{
+            const propios=documentos.filter(d=>d.tipo===clave);
+            const obligatorio=requeridos.has(clave);
+            const badge=propios.length
+                ?`<span class="badge badge-success">Adjunto${propios.length>1?` (${propios.length})`:''}</span>`
+                :`<span class="badge ${obligatorio?'badge-secondary':'badge-secondary'}" style="${obligatorio?'background:#fee2e2;color:#b91c1c;':''}">Faltante${obligatorio?' (obligatorio)':''}</span>`;
+            const filasArchivos=propios.map(d=>`
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid #f1f5f9;">
+                    <small style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.nombre_original||'Documento')} <span style="color:#94a3b8;">· ${escapeHtml((d.fecha_subida||'').slice(0,10))}</span></small>
+                    <div style="display:flex;gap:6px;flex-shrink:0;">
+                        <button type="button" class="btn btn-secondary" style="padding:2px 8px;font-size:.75rem;" data-doc-ver="${d.id}"><i class="fa-solid fa-eye"></i></button>
+                        <button type="button" class="btn" style="padding:2px 8px;font-size:.75rem;background:#fee2e2;color:#b91c1c;border:none;" data-doc-eliminar="${d.id}"><i class="fa-solid fa-trash"></i></button>
+                    </div>
+                </div>`).join('');
+            return `<div class="profile-box" style="text-align:left;margin-bottom:8px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                    <span>${escapeHtml(etiqueta)}</span>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        ${badge}
+                        <button type="button" class="btn btn-primary" style="padding:3px 10px;font-size:.78rem;" data-doc-subir="${clave}"><i class="fa-solid fa-upload"></i> Agregar</button>
+                    </div>
+                </div>
+                ${filasArchivos}
+            </div>`;
+        }).join('');
+
+        cont.querySelectorAll('[data-doc-subir]').forEach(btn=>btn.onclick=async()=>{
+            btn.disabled=true;
+            try{
+                const r=await window.api.subirDocumentoEmpleado({empleadoId,tipo:btn.dataset.docSubir});
+                if(r?.ok){mostrarNotificacionLocal('Documento agregado al expediente.','success');await cargarDocumentosPerfil(empleadoId);}
+                else if(!r?.cancelado) mostrarNotificacionLocal(r?.error||'No se pudo agregar el documento.','error');
+            }catch(e){mostrarNotificacionLocal(`Error: ${e.message}`,'error');}
+            finally{btn.disabled=false;}
+        });
+        cont.querySelectorAll('[data-doc-ver]').forEach(btn=>btn.onclick=async()=>{
+            const r=await window.api.abrirDocumentoEmpleado(Number(btn.dataset.docVer));
+            if(!r?.ok) mostrarNotificacionLocal(r?.error||'No se pudo abrir el documento.','error');
+        });
+        cont.querySelectorAll('[data-doc-eliminar]').forEach(btn=>btn.onclick=async()=>{
+            const ok=await window.showConfirm('¿Eliminar este documento del expediente? Esta acción no se puede deshacer.','Confirmar');
+            if(!ok) return;
+            const r=await window.api.eliminarDocumentoEmpleado(Number(btn.dataset.docEliminar));
+            if(r?.ok){mostrarNotificacionLocal('Documento eliminado.','success');await cargarDocumentosPerfil(empleadoId);}
+            else mostrarNotificacionLocal(r?.error||'No se pudo eliminar el documento.','error');
+        });
+    }catch(e){
+        cont.innerHTML='<div class="profile-box">No fue posible cargar los documentos del expediente.</div>';
+        console.error('Documentos del expediente:',e);
+    }
 }
 
 async function cargarCalendarioProfesional() {

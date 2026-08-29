@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const crypto = require('crypto');
 const os = require('os');
@@ -175,7 +175,12 @@ function calcularDiasVacacionesLFT(anios) {
 const SALT_CIFRADO_DB = 'SISTEMA_RRHH_VACACIONES_V3_SALT_FIJO_2026';
 const CABECERA_SQLITE_PLANO = 'SQLite format 3';
 
-function obtenerClaveCifradoDB() {
+// Fórmula de llave heredada (v3): derivada solo de datos NO secretos de la máquina
+// (hostname, usuario de Windows, ruta). Cualquiera con acceso al equipo puede
+// recalcularla — no protege contra un atacante local. Se conserva únicamente
+// para poder abrir/re-cifrar bases de datos creadas antes del refuerzo de
+// seguridad (ver obtenerClaveCifradoDB).
+function obtenerClaveCifradoDBHeredada() {
     const materialClave = [
         os.hostname(),
         os.userInfo().username,
@@ -184,6 +189,166 @@ function obtenerClaveCifradoDB() {
     ].join('|');
     return crypto.scryptSync(materialClave, SALT_CIFRADO_DB, 32).toString('hex');
 }
+
+// ==========================================
+// GESTIÓN SEGURA DE LLAVES (Electron safeStorage / DPAPI en Windows)
+// ==========================================
+// Genera (una sola vez) un secreto aleatorio de 256 bits por archivo y lo
+// guarda cifrado con el almacén de credenciales del sistema operativo,
+// ligado a la cuenta de Windows del usuario — a diferencia de la fórmula
+// heredada de arriba, esto SÍ es un secreto real: nadie puede leerlo sin
+// iniciar sesión como ese usuario de Windows.
+function obtenerOCrearSecretoSeguro(nombreArchivo) {
+    const rutaSecreto = path.join(app.getPath('userData'), nombreArchivo);
+    if (fs.existsSync(rutaSecreto)) {
+        const cifrado = fs.readFileSync(rutaSecreto);
+        if (!safeStorage.isEncryptionAvailable()) {
+            throw new Error(`El almacén seguro del sistema operativo no está disponible para leer ${nombreArchivo}.`);
+        }
+        return Buffer.from(safeStorage.decryptString(cifrado), 'hex');
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+        throw new Error(`El almacén seguro del sistema operativo no está disponible para crear ${nombreArchivo}.`);
+    }
+    const nuevoSecreto = crypto.randomBytes(32);
+    const cifrado = safeStorage.encryptString(nuevoSecreto.toString('hex'));
+    fs.writeFileSync(rutaSecreto, cifrado);
+    return nuevoSecreto;
+}
+
+let _claveCifradoDBCache = null;
+// Llave real (v4) de la base de datos completa: secreto aleatorio protegido
+// por el sistema operativo, no una fórmula recalculable.
+function obtenerClaveCifradoDB() {
+    if (_claveCifradoDBCache) return _claveCifradoDBCache;
+    const secreto = obtenerOCrearSecretoSeguro('db.key');
+    _claveCifradoDBCache = secreto.toString('hex');
+    return _claveCifradoDBCache;
+}
+
+let _claveCifradoCamposCache = null;
+let _claveIndiceCiegoCache = null;
+let _claveArchivosCache = null;
+// Llaves derivadas de un mismo secreto maestro para el cifrado de datos
+// sensibles del expediente (RFC/NSS/CURP y documentos adjuntos) — independientes
+// de la llave de la base de datos completa: defensa en profundidad ante un
+// respaldo (.db) o un volcado que de otra forma quedara legible en cuanto se
+// abre con la llave de la base de datos. Cada uso (campo, índice ciego,
+// archivo) tiene su propia sub-llave para no reutilizar una misma llave con
+// distintos propósitos criptográficos.
+function obtenerClavesCifradoCampos() {
+    if (_claveCifradoCamposCache && _claveIndiceCiegoCache && _claveArchivosCache) {
+        return { claveCifrado: _claveCifradoCamposCache, claveIndice: _claveIndiceCiegoCache, claveArchivos: _claveArchivosCache };
+    }
+    const maestra = obtenerOCrearSecretoSeguro('pii.key');
+    _claveCifradoCamposCache = crypto.createHmac('sha256', maestra).update('campo-cifrado-v1').digest();
+    _claveIndiceCiegoCache = crypto.createHmac('sha256', maestra).update('indice-ciego-v1').digest();
+    _claveArchivosCache = crypto.createHmac('sha256', maestra).update('archivo-cifrado-v1').digest();
+    return { claveCifrado: _claveCifradoCamposCache, claveIndice: _claveIndiceCiegoCache, claveArchivos: _claveArchivosCache };
+}
+
+// Cifra un valor sensible (RFC/NSS/CURP) con AES-256-GCM e IV aleatorio por
+// valor — dos empleados con el mismo RFC producen cifrados distintos, así
+// que la duplicidad se controla aparte con indiceCiegoCampo().
+function cifrarCampoSensible(valorPlano) {
+    const valor = String(valorPlano ?? '').trim();
+    if (!valor) return null;
+    const { claveCifrado } = obtenerClavesCifradoCampos();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', claveCifrado, iv);
+    const cifrado = Buffer.concat([cipher.update(valor, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `encv1.${iv.toString('base64')}.${tag.toString('base64')}.${cifrado.toString('base64')}`;
+}
+
+function descifrarCampoSensible(valorCifrado) {
+    if (!valorCifrado) return null;
+    try {
+        const partes = String(valorCifrado).split('.');
+        if (partes.length !== 4 || partes[0] !== 'encv1') return null;
+        const { claveCifrado } = obtenerClavesCifradoCampos();
+        const iv = Buffer.from(partes[1], 'base64');
+        const tag = Buffer.from(partes[2], 'base64');
+        const cifrado = Buffer.from(partes[3], 'base64');
+        const decipher = crypto.createDecipheriv('aes-256-gcm', claveCifrado, iv);
+        decipher.setAuthTag(tag);
+        return Buffer.concat([decipher.update(cifrado), decipher.final()]).toString('utf8');
+    } catch (error) {
+        console.error('No se pudo descifrar un campo sensible:', error.message);
+        return null;
+    }
+}
+
+// Huella determinística (HMAC-SHA256) del valor normalizado: mismo RFC/NSS
+// siempre produce la misma huella, lo que permite mantener la detección de
+// duplicados y la búsqueda exacta sin exponer ni almacenar el valor real.
+function indiceCiegoCampo(valorNormalizado) {
+    const valor = String(valorNormalizado ?? '').trim();
+    if (!valor) return null;
+    const { claveIndice } = obtenerClavesCifradoCampos();
+    return crypto.createHmac('sha256', claveIndice).update(valor).digest('hex');
+}
+
+// Aplica el descifrado de RFC/NSS/CURP sobre una fila de empleado ya leída de
+// la BD (que trae las columnas *_enc). No falla si la fila no las trae.
+function descifrarCamposEmpleado(fila) {
+    if (!fila) return fila;
+    if ('rfc_enc' in fila) fila.rfc = descifrarCampoSensible(fila.rfc_enc);
+    if ('nss_enc' in fila) fila.nss = descifrarCampoSensible(fila.nss_enc);
+    if ('curp_enc' in fila) fila.curp = descifrarCampoSensible(fila.curp_enc);
+    return fila;
+}
+
+function descifrarCamposEmpleados(filas) {
+    return (filas || []).map(descifrarCamposEmpleado);
+}
+
+// ==========================================
+// CIFRADO DE ARCHIVOS DEL EXPEDIENTE (documentos_empleado)
+// ==========================================
+const CABECERA_ARCHIVO_CIFRADO = Buffer.from('EFC1', 'utf8');
+
+function cifrarBufferArchivo(bufferOriginal) {
+    const { claveArchivos } = obtenerClavesCifradoCampos();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', claveArchivos, iv);
+    const cifrado = Buffer.concat([cipher.update(bufferOriginal), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return Buffer.concat([CABECERA_ARCHIVO_CIFRADO, iv, tag, cifrado]);
+}
+
+function descifrarBufferArchivo(bufferCifrado) {
+    const cabecera = bufferCifrado.subarray(0, 4);
+    if (!cabecera.equals(CABECERA_ARCHIVO_CIFRADO)) throw new Error('Formato de archivo cifrado no reconocido.');
+    const iv = bufferCifrado.subarray(4, 16);
+    const tag = bufferCifrado.subarray(16, 32);
+    const cifrado = bufferCifrado.subarray(32);
+    const { claveArchivos } = obtenerClavesCifradoCampos();
+    const decipher = crypto.createDecipheriv('aes-256-gcm', claveArchivos, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(cifrado), decipher.final()]);
+}
+
+function carpetaExpedienteEmpleado(empleadoId) {
+    const dir = path.join(app.getPath('userData'), 'expedientes', String(empleadoId));
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return dir;
+}
+
+// Catálogo de tipos de documento del expediente digital. Los primeros cuatro
+// se consideran obligatorios para el aviso de "expediente incompleto" del
+// panorama laboral; el resto son informativos.
+const DOCUMENTOS_REQUERIDOS_EXPEDIENTE = ['INE', 'ACTA_NACIMIENTO', 'COMPROBANTE_DOMICILIO', 'CONTRATO_FIRMADO'];
+const CATALOGO_TIPOS_DOCUMENTO = {
+    INE: 'Identificación oficial (INE)',
+    ACTA_NACIMIENTO: 'Acta de nacimiento',
+    COMPROBANTE_DOMICILIO: 'Comprobante de domicilio',
+    CONTRATO_FIRMADO: 'Contrato firmado',
+    RFC_DOC: 'Constancia de situación fiscal (RFC)',
+    NSS_DOC: 'Constancia de afiliación IMSS (NSS)',
+    CURP_DOC: 'CURP',
+    OTRO: 'Otro documento'
+};
 
 function archivoEsSQLitePlano(ruta) {
     const fd = fs.openSync(ruta, 'r');
@@ -197,12 +362,21 @@ function archivoEsSQLitePlano(ruta) {
     }
 }
 
+function puedeLeerBaseDeDatos(instanciaDB) {
+    try {
+        instanciaDB.prepare('SELECT count(*) FROM sqlite_master').get();
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
 function abrirDB() {
     dbPath = app.isPackaged
         ? path.join(app.getPath('userData'), 'sistema_rrhh.db')
         : path.join(app.getPath('userData'), 'sistema_rrhh_dev.db');
 
-    const claveCifrado = obtenerClaveCifradoDB();
+    const claveNueva = obtenerClaveCifradoDB();
     const existiaArchivo = fs.existsSync(dbPath);
     const esLegacySinCifrar = existiaArchivo && archivoEsSQLitePlano(dbPath);
 
@@ -210,15 +384,37 @@ function abrirDB() {
         const rutaBackup = `${dbPath}.sin-cifrar.bak`;
         fs.copyFileSync(dbPath, rutaBackup);
         console.log('DB legacy sin cifrar detectada. Backup creado en:', rutaBackup);
-    }
-
-    db = new Database(dbPath);
-
-    if (esLegacySinCifrar) {
-        db.pragma(`rekey='${claveCifrado}'`);
-        console.log('DB migrada a cifrado exitosamente.');
+        db = new Database(dbPath);
+        // SQLCipher no permite "rekey" en modo journal WAL; se hace en modo DELETE
+        // (por defecto en una conexión nueva) y se cambia a WAL después, al final.
+        db.pragma(`rekey='${claveNueva}'`);
+        console.log('DB migrada a cifrado exitosamente (llave protegida por el sistema operativo).');
+    } else if (existiaArchivo) {
+        db = new Database(dbPath);
+        db.pragma(`key='${claveNueva}'`);
+        if (!puedeLeerBaseDeDatos(db)) {
+            // La llave nueva (protegida por el SO) no abrió el archivo: es una BD
+            // cifrada con la fórmula heredada v3 (derivada de datos no secretos de
+            // la máquina). Se reintenta con esa fórmula y, si funciona, se re-cifra
+            // de una vez con la llave nueva para dejar de depender de ella.
+            db.close();
+            const claveHeredada = obtenerClaveCifradoDBHeredada();
+            db = new Database(dbPath);
+            db.pragma(`key='${claveHeredada}'`);
+            if (!puedeLeerBaseDeDatos(db)) {
+                db.close();
+                throw new Error('No fue posible abrir la base de datos: la llave de cifrado no coincide.');
+            }
+            // El archivo ya puede estar en modo WAL de una sesión anterior — SQLCipher
+            // no permite "rekey" en ese modo, así que se cambia a DELETE antes de
+            // recifrar (journal_mode = WAL se vuelve a fijar más abajo, al final).
+            db.pragma('journal_mode = DELETE');
+            db.pragma(`rekey='${claveNueva}'`);
+            console.log('DB re-cifrada con la llave protegida por el sistema operativo (migración desde la fórmula heredada).');
+        }
     } else {
-        db.pragma(`key='${claveCifrado}'`);
+        db = new Database(dbPath);
+        db.pragma(`key='${claveNueva}'`);
     }
 
     db.pragma('journal_mode = WAL');
@@ -516,11 +712,50 @@ async function crearTablas() {
     await dbRun(`UPDATE empleados SET rfc = NULL WHERE TRIM(COALESCE(rfc,'')) = ''`);
     await dbRun(`UPDATE empleados SET nss = NULL WHERE TRIM(COALESCE(nss,'')) = ''`);
 
-    // Evita nuevos duplicados de RFC/NSS sin romper bases antiguas que pudieran
-    // contener valores vacíos o duplicados históricos.
-    try { await dbRun(`CREATE UNIQUE INDEX IF NOT EXISTS ux_empleados_rfc_no_vacio ON empleados (UPPER(TRIM(rfc))) WHERE rfc IS NOT NULL AND TRIM(rfc) <> ''`); } catch (e) { console.warn('No se pudo crear índice único RFC por duplicados históricos:', e.message); }
-    try { await dbRun(`CREATE UNIQUE INDEX IF NOT EXISTS ux_empleados_nss_no_vacio ON empleados (TRIM(nss)) WHERE nss IS NOT NULL AND TRIM(nss) <> ''`); } catch (e) { console.warn('No se pudo crear índice único NSS por duplicados históricos:', e.message); }
     try { await dbRun(`CREATE UNIQUE INDEX IF NOT EXISTS ux_empleados_num_empresa_no_vacio ON empleados (empresa_id, UPPER(TRIM(num_empleado))) WHERE num_empleado IS NOT NULL AND TRIM(num_empleado) <> ''`); } catch (e) { console.warn('No se pudo crear índice único de número de empleado por duplicados históricos:', e.message); }
+
+    // ==========================================
+    // Cifrado por campo de RFC/NSS/CURP (expediente digital)
+    // ==========================================
+    // rfc/nss/curp dejan de guardarse en claro: se guarda su valor cifrado
+    // (AES-256-GCM, IV aleatorio por valor) en *_enc, y para RFC/NSS además una
+    // huella determinística (HMAC-SHA256) en *_idx que permite seguir
+    // detectando duplicados y hacer búsquedas exactas sin exponer el valor real.
+    if (!nombresColumnas.has('rfc_enc')) await dbRun(`ALTER TABLE empleados ADD COLUMN rfc_enc TEXT`);
+    if (!nombresColumnas.has('rfc_idx')) await dbRun(`ALTER TABLE empleados ADD COLUMN rfc_idx TEXT`);
+    if (!nombresColumnas.has('nss_enc')) await dbRun(`ALTER TABLE empleados ADD COLUMN nss_enc TEXT`);
+    if (!nombresColumnas.has('nss_idx')) await dbRun(`ALTER TABLE empleados ADD COLUMN nss_idx TEXT`);
+    if (!nombresColumnas.has('curp_enc')) await dbRun(`ALTER TABLE empleados ADD COLUMN curp_enc TEXT`);
+
+    try { await dbRun(`DROP INDEX IF EXISTS ux_empleados_rfc_no_vacio`); } catch (_) {}
+    try { await dbRun(`DROP INDEX IF EXISTS ux_empleados_nss_no_vacio`); } catch (_) {}
+
+    // Migración única: cifra cualquier RFC/NSS/CURP que siga en claro (bases
+    // creadas antes de este refuerzo) y limpia la columna original.
+    const pendientesCifrado = await dbAll(`SELECT id, rfc, nss, curp FROM empleados WHERE (rfc IS NOT NULL AND TRIM(rfc) <> '') OR (nss IS NOT NULL AND TRIM(nss) <> '') OR (curp IS NOT NULL AND TRIM(curp) <> '')`);
+    if (pendientesCifrado.length) {
+        for (const fila of pendientesCifrado) {
+            const rfcNorm = fila.rfc ? String(fila.rfc).trim().toUpperCase() : null;
+            const nssNorm = fila.nss ? String(fila.nss).trim() : null;
+            await dbRun(
+                `UPDATE empleados SET rfc = NULL, rfc_enc = ?, rfc_idx = ?, nss = NULL, nss_enc = ?, nss_idx = ?, curp = NULL, curp_enc = ? WHERE id = ?`,
+                [
+                    rfcNorm ? cifrarCampoSensible(rfcNorm) : null,
+                    rfcNorm ? indiceCiegoCampo(rfcNorm) : null,
+                    nssNorm ? cifrarCampoSensible(nssNorm) : null,
+                    nssNorm ? indiceCiegoCampo(nssNorm) : null,
+                    fila.curp && String(fila.curp).trim() ? cifrarCampoSensible(String(fila.curp).trim().toUpperCase()) : null,
+                    fila.id
+                ]
+            );
+        }
+        console.log(`Cifrado de expediente: ${pendientesCifrado.length} registro(s) de RFC/NSS/CURP migrado(s).`);
+    }
+
+    // Evita nuevos duplicados de RFC/NSS mediante su huella (no el valor cifrado,
+    // que es distinto cada vez aunque el RFC/NSS real sea el mismo).
+    try { await dbRun(`CREATE UNIQUE INDEX IF NOT EXISTS ux_empleados_rfc_idx ON empleados (rfc_idx) WHERE rfc_idx IS NOT NULL`); } catch (e) { console.warn('No se pudo crear índice único de RFC cifrado por duplicados históricos:', e.message); }
+    try { await dbRun(`CREATE UNIQUE INDEX IF NOT EXISTS ux_empleados_nss_idx ON empleados (nss_idx) WHERE nss_idx IS NOT NULL`); } catch (e) { console.warn('No se pudo crear índice único de NSS cifrado por duplicados históricos:', e.message); }
 
     // Logotipo por empresa: usado en reportes/PDF; si una empresa no tiene uno propio
     // se usa el logotipo de la aplicación (logo.png) como valor por defecto.
@@ -530,6 +765,28 @@ async function crearTablas() {
         await dbRun(`ALTER TABLE empresas ADD COLUMN logo_path TEXT`);
     }
 
+    // Fecha de nacimiento: habilita las alertas de cumpleaños del panorama laboral
+    // y se muestra/exporta junto con el resto de la ficha del empleado.
+    if (!nombresColumnas.has('fecha_nacimiento')) {
+        await dbRun(`ALTER TABLE empleados ADD COLUMN fecha_nacimiento TEXT`);
+    }
+
+    // Expediente digital: documentos adjuntos por empleado (INE, acta, comprobante
+    // de domicilio, contrato firmado, etc.). El archivo se copia cifrado (AES-256-GCM)
+    // a userData/expedientes — no se referencia la ubicación original del usuario.
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS documentos_empleado (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            empleado_id INTEGER NOT NULL,
+            tipo TEXT NOT NULL,
+            nombre_original TEXT,
+            extension TEXT,
+            archivo_cifrado TEXT NOT NULL,
+            fecha_subida TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (empleado_id) REFERENCES empleados(id) ON DELETE CASCADE
+        );
+    `);
+    try { await dbRun(`CREATE INDEX IF NOT EXISTS idx_documentos_empleado ON documentos_empleado(empleado_id)`); } catch (_) {}
 }
 
 // ==========================================
@@ -789,7 +1046,7 @@ async function registrarAuditoria(accion,modulo,detalle=''){try{await dbRun(`INS
     ipcMain.handle('perfil:exportar-pdf', async (event,payload={})=>{
         try{
             const empleadoId=Number(payload.empleadoId||payload.id||0);if(!empleadoId)return{ok:false,error:'Seleccione un empleado.'};
-            const emp=await dbGet(`SELECT e.*,em.nombre AS empresa_nombre FROM empleados e LEFT JOIN empresas em ON em.id=e.empresa_id WHERE e.id=?`,[empleadoId]);
+            const emp=descifrarCamposEmpleado(await dbGet(`SELECT e.*,em.nombre AS empresa_nombre FROM empleados e LEFT JOIN empresas em ON em.id=e.empresa_id WHERE e.id=?`,[empleadoId]));
             if(!emp)return{ok:false,error:'Empleado no encontrado.'};
             // Misma fuente que Vacaciones/Finiquitos (calcularSaldoVacacionesUnificado),
             // no la columna cruda — evita que este PDF muestre un saldo distinto al
@@ -799,20 +1056,94 @@ async function registrarAuditoria(accion,modulo,detalle=''){try{await dbRun(`INS
             const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
             const nombre=`${emp.nombre||''} ${emp.apellido||''}`.trim();
             const logoDataUrl=obtenerLogoDataUrlPorEmpresaId(emp.empresa_id);
-            const doc=`<!doctype html><html><head><meta charset="UTF-8"><style>body{font-family:Segoe UI,Arial,sans-serif;color:#172033;padding:28px}h1{margin:0 0 4px;font-size:24px}h2{font-size:16px;margin:24px 0 10px;border-bottom:2px solid #dbe3ee;padding-bottom:6px}.muted{color:#64748b}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.item{border:1px solid #dbe3ee;border-radius:8px;padding:10px}.label{display:block;color:#64748b;font-size:11px;text-transform:uppercase}.value{font-weight:600;margin-top:4px}.doc-header{display:flex;align-items:center;gap:14px;margin-bottom:10px}.doc-header img{width:56px;height:56px;object-fit:contain}</style></head><body><div class="doc-header">${logoDataUrl?`<img src="${logoDataUrl}" alt="Logotipo">`:''}<div><h1>Ficha profesional del empleado</h1><div class="muted">${esc(nombre)} · ${esc(obtenerFechaLocal())}</div></div></div><h2>Identificación</h2><div class="grid"><div class="item"><span class="label">Número de empleado</span><span class="value">${esc(emp.num_empleado)}</span></div><div class="item"><span class="label">Empresa</span><span class="value">${esc(emp.empresa_nombre)}</span></div><div class="item"><span class="label">Edad</span><span class="value">${emp.edad!==null&&emp.edad!==''?esc(emp.edad)+' años':'No capturada'}</span></div><div class="item"><span class="label">RFC</span><span class="value">${esc(emp.rfc||'No capturado')}</span></div><div class="item"><span class="label">NSS</span><span class="value">${esc(emp.nss||'No capturado')}</span></div><div class="item"><span class="label">CURP</span><span class="value">${esc(emp.curp||'No capturada')}</span></div></div><h2>Información laboral</h2><div class="grid"><div class="item"><span class="label">Puesto</span><span class="value">${esc(emp.puesto||'Sin puesto')}</span></div><div class="item"><span class="label">Fecha de ingreso</span><span class="value">${esc(emp.fecha_ingreso)}</span></div><div class="item"><span class="label">Salario diario</span><span class="value">$${Number(emp.salario_diario||0).toFixed(2)}</span></div><div class="item"><span class="label">SBC</span><span class="value">$${Number(emp.salario_base||0).toFixed(2)}</span></div><div class="item"><span class="label">Estatus</span><span class="value">${Number(emp.activo)===1?'Activo':('Inactivo'+(emp.fecha_baja?' desde '+esc(emp.fecha_baja):''))}</span></div><div class="item"><span class="label">Vacaciones disponibles</span><span class="value">${dias} día(s)</span></div></div><h2>Contrato</h2><div class="grid"><div class="item"><span class="label">Fecha de firma de contrato</span><span class="value">${esc(emp.fecha_contrato||'No capturada')}</span></div><div class="item"><span class="label">Vencimiento de contrato</span><span class="value">${esc(emp.fecha_vencimiento_contrato||'No aplica / indefinido')}</span></div><div class="item" style="grid-column:1/-1;"><span class="label">Contrato PDF</span><span class="value">${esc(emp.ruta_contrato_pdf||'No asociado')}</span></div></div></body></html>`;
+
+            const documentosAdjuntos = await dbAll(`SELECT * FROM documentos_empleado WHERE empleado_id = ? ORDER BY tipo ASC, fecha_subida ASC`, [empleadoId]);
+            const tiposPresentes = new Set(documentosAdjuntos.map(d => d.tipo));
+            const filasChecklist = Object.entries(CATALOGO_TIPOS_DOCUMENTO).map(([clave,etiqueta])=>{
+                const presente = tiposPresentes.has(clave);
+                const obligatorio = DOCUMENTOS_REQUERIDOS_EXPEDIENTE.includes(clave);
+                return `<div class="item"><span class="label">${esc(etiqueta)}${obligatorio?' *':''}</span><span class="value" style="color:${presente?'#0f766e':'#b91c1c'}">${presente?'Adjunto':'Faltante'}</span></div>`;
+            }).join('');
+
+            const doc=`<!doctype html><html><head><meta charset="UTF-8"><style>body{font-family:Segoe UI,Arial,sans-serif;color:#172033;padding:28px}h1{margin:0 0 4px;font-size:24px}h2{font-size:16px;margin:24px 0 10px;border-bottom:2px solid #dbe3ee;padding-bottom:6px}.muted{color:#64748b}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.item{border:1px solid #dbe3ee;border-radius:8px;padding:10px}.label{display:block;color:#64748b;font-size:11px;text-transform:uppercase}.value{font-weight:600;margin-top:4px}.doc-header{display:flex;align-items:center;gap:14px;margin-bottom:10px}.doc-header img{width:56px;height:56px;object-fit:contain}.nota{color:#94a3b8;font-size:10px;margin-top:6px}</style></head><body><div class="doc-header">${logoDataUrl?`<img src="${logoDataUrl}" alt="Logotipo">`:''}<div><h1>Ficha profesional del empleado</h1><div class="muted">${esc(nombre)} · ${esc(obtenerFechaLocal())}</div></div></div><h2>Identificación</h2><div class="grid"><div class="item"><span class="label">Número de empleado</span><span class="value">${esc(emp.num_empleado)}</span></div><div class="item"><span class="label">Empresa</span><span class="value">${esc(emp.empresa_nombre)}</span></div><div class="item"><span class="label">Fecha de nacimiento</span><span class="value">${esc(emp.fecha_nacimiento||'No capturada')}</span></div><div class="item"><span class="label">Edad</span><span class="value">${emp.edad!==null&&emp.edad!==''?esc(emp.edad)+' años':'No capturada'}</span></div><div class="item"><span class="label">RFC</span><span class="value">${esc(emp.rfc||'No capturado')}</span></div><div class="item"><span class="label">NSS</span><span class="value">${esc(emp.nss||'No capturado')}</span></div><div class="item"><span class="label">CURP</span><span class="value">${esc(emp.curp||'No capturada')}</span></div></div><h2>Información laboral</h2><div class="grid"><div class="item"><span class="label">Puesto</span><span class="value">${esc(emp.puesto||'Sin puesto')}</span></div><div class="item"><span class="label">Fecha de ingreso</span><span class="value">${esc(emp.fecha_ingreso)}</span></div><div class="item"><span class="label">Salario diario</span><span class="value">$${Number(emp.salario_diario||0).toFixed(2)}</span></div><div class="item"><span class="label">SBC</span><span class="value">$${Number(emp.salario_base||0).toFixed(2)}</span></div><div class="item"><span class="label">Estatus</span><span class="value">${Number(emp.activo)===1?'Activo':('Inactivo'+(emp.fecha_baja?' desde '+esc(emp.fecha_baja):''))}</span></div><div class="item"><span class="label">Vacaciones disponibles</span><span class="value">${dias} día(s)</span></div></div><h2>Contrato</h2><div class="grid"><div class="item"><span class="label">Fecha de firma de contrato</span><span class="value">${esc(emp.fecha_contrato||'No capturada')}</span></div><div class="item"><span class="label">Vencimiento de contrato</span><span class="value">${esc(emp.fecha_vencimiento_contrato||'No aplica / indefinido')}</span></div><div class="item" style="grid-column:1/-1;"><span class="label">Contrato PDF</span><span class="value">${esc(emp.ruta_contrato_pdf||'No asociado')}</span></div></div><h2>Documentos del expediente</h2><div class="grid">${filasChecklist}</div><div class="nota">* Documento considerado obligatorio para el expediente. Los documentos adjuntos se incluyen a continuación de esta ficha.</div></body></html>`;
             const save=await dialog.showSaveDialog(mainWindow,{title:'Exportar ficha del empleado a PDF',defaultPath:`Ficha_${String(emp.num_empleado||emp.id).replace(/[^a-zA-Z0-9_-]/g,'_')}.pdf`,filters:[{name:'PDF',extensions:['pdf']}]});
             if(save.canceled||!save.filePath)return{ok:false,cancelado:true};
             const win=new BrowserWindow({show:false,webPreferences:{sandbox:true}});
             await win.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(doc));
             const pdf=await win.webContents.printToPDF({printBackground:true,margins:{marginType:'default'}});
-            fs.writeFileSync(save.filePath,pdf);win.destroy();return{ok:true,filePath:save.filePath};
+            win.destroy();
+
+            // Fusiona la ficha con cada documento adjunto (PDF o imagen) en un solo
+            // archivo final, con una página separadora antes de cada documento.
+            const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+            const documentoFinal = await PDFDocument.create();
+            const fichaCargada = await PDFDocument.load(pdf);
+            (await documentoFinal.copyPages(fichaCargada, fichaCargada.getPageIndices())).forEach(p => documentoFinal.addPage(p));
+
+            if (documentosAdjuntos.length) {
+                const fuente = await documentoFinal.embedFont(StandardFonts.HelveticaBold);
+                for (const docAdj of documentosAdjuntos) {
+                    try {
+                        const rutaCifrada = path.join(carpetaExpedienteEmpleado(empleadoId), docAdj.archivo_cifrado);
+                        if (!fs.existsSync(rutaCifrada)) continue;
+                        const bufferPlano = descifrarBufferArchivo(fs.readFileSync(rutaCifrada));
+
+                        const separadora = documentoFinal.addPage([612, 792]);
+                        separadora.drawText(CATALOGO_TIPOS_DOCUMENTO[docAdj.tipo] || docAdj.tipo, { x: 50, y: 700, size: 20, font: fuente, color: rgb(0.06,0.46,0.43) });
+                        separadora.drawText(docAdj.nombre_original || '', { x: 50, y: 672, size: 11, color: rgb(0.4,0.46,0.55) });
+
+                        const ext = String(docAdj.extension || '').toLowerCase();
+                        if (ext === 'pdf') {
+                            const cargado = await PDFDocument.load(bufferPlano);
+                            (await documentoFinal.copyPages(cargado, cargado.getPageIndices())).forEach(p => documentoFinal.addPage(p));
+                        } else if (ext === 'jpg' || ext === 'jpeg' || ext === 'png') {
+                            const imagen = ext === 'png' ? await documentoFinal.embedPng(bufferPlano) : await documentoFinal.embedJpg(bufferPlano);
+                            const pagina = documentoFinal.addPage([imagen.width, imagen.height]);
+                            pagina.drawImage(imagen, { x: 0, y: 0, width: imagen.width, height: imagen.height });
+                        }
+                    } catch (errDoc) {
+                        console.warn('No se pudo incluir un documento del expediente en el PDF:', errDoc.message);
+                    }
+                }
+            }
+
+            fs.writeFileSync(save.filePath, await documentoFinal.save());
+            return{ok:true,filePath:save.filePath};
         }catch(error){return{ok:false,error:error.message};}
     });
 
 function registrarHandlersIPC() {
     ipcMain.handle('auth:login', async (event, d={}) => { try { const a=await dbGet(`SELECT * FROM usuarios_admin WHERE id=1`); const u=String(d.usuario||'').trim(); const pw=String(d.password||''); if(!a||u!==a.usuario||hashPassword(pw,a.salt)!==a.password_hash)return {ok:false,error:'Usuario o contraseña incorrectos.'}; await dbRun(`UPDATE usuarios_admin SET ultimo_acceso=CURRENT_TIMESTAMP WHERE id=1`); await registrarAuditoria('Inicio de sesión','Seguridad','Acceso correcto'); sesionIniciada = true; return {ok:true,usuario:a.usuario,debeCambiarPassword:!!a.debe_cambiar_password}; }catch(error){return {ok:false,error:error.message};} });
     ipcMain.handle('auth:cambiar-password', async (event,d={}) => { try { const a=await dbGet(`SELECT * FROM usuarios_admin WHERE id=1`); const actual=String(d.actual||''),nueva=String(d.nueva||''); if(nueva.length<8)return {ok:false,error:'La nueva contraseña debe tener al menos 8 caracteres.'}; if(!a||hashPassword(actual,a.salt)!==a.password_hash)return {ok:false,error:'La contraseña actual no es correcta.'}; const salt=crypto.randomBytes(16).toString('hex'); const hash=hashPassword(nueva,salt); await dbRun(`UPDATE usuarios_admin SET password_hash=?,salt=?,debe_cambiar_password=0 WHERE id=1`,[hash,salt]); await registrarAuditoria('Cambio de contraseña','Seguridad','Contraseña actualizada'); return {ok:true}; }catch(error){return {ok:false,error:error.message};} });
-    ipcMain.handle('dashboard:resumen', async (event,empresaId)=>{try{const w=empresaId?'WHERE e.empresa_id=? AND e.activo=1':'WHERE e.activo=1',p=empresaId?[empresaId]:[];const a=await dbGet(`SELECT COUNT(*) total FROM empleados e ${w}`,p);const b=await dbGet(`SELECT ROUND(IFNULL(SUM(s.dias_restantes),0),1) total FROM saldos_vacaciones s JOIN empleados e ON e.id=s.empleado_id ${w} AND s.fecha_disponible<=?`,[...p,obtenerFechaLocal()]);const c=await dbGet(`SELECT ROUND(IFNULL(SUM(s2.dias_solicitados),0),1) total FROM solicitudes_vacaciones s2 JOIN empleados e ON e.id=s2.empleado_id ${w} AND (s2.estado IS NULL OR s2.estado != 'Cancelada')`,p);const d=await dbGet(`SELECT COUNT(*) total FROM solicitudes_vacaciones s JOIN empleados e ON e.id=s.empleado_id ${w} AND s.estado='Pendiente'`,p);const proximos=await dbAll(`SELECT e.id,e.nombre,e.apellido,e.num_empleado,e.fecha_ingreso FROM empleados e ${w} ORDER BY e.fecha_ingreso ASC LIMIT 8`,p);return {ok:true,data:{empleados:a.total||0,diasDisponibles:b.total||0,diasOtorgados:c.total||0,pendientes:d.total||0,proximos}};}catch(error){return {ok:false,error:error.message};}});
+    ipcMain.handle('dashboard:resumen', async (event, empresaId) => {
+        try {
+            const w = empresaId ? 'WHERE e.empresa_id=? AND e.activo=1' : 'WHERE e.activo=1';
+            const p = empresaId ? [empresaId] : [];
+            const a = await dbGet(`SELECT COUNT(*) total FROM empleados e ${w}`, p);
+            const b = await dbGet(`SELECT ROUND(IFNULL(SUM(s.dias_restantes),0),1) total FROM saldos_vacaciones s JOIN empleados e ON e.id=s.empleado_id ${w} AND s.fecha_disponible<=?`, [...p, obtenerFechaLocal()]);
+            const c = await dbGet(`SELECT ROUND(IFNULL(SUM(s2.dias_solicitados),0),1) total FROM solicitudes_vacaciones s2 JOIN empleados e ON e.id=s2.empleado_id ${w} AND (s2.estado IS NULL OR s2.estado != 'Cancelada')`, p);
+            const d = await dbGet(`SELECT COUNT(*) total FROM solicitudes_vacaciones s JOIN empleados e ON e.id=s.empleado_id ${w} AND s.estado='Pendiente'`, p);
+            // Sin LIMIT: el renderer calcula la fecha más cercana (aniversario o
+            // cumpleaños) de cada empleado y ordena por cercanía — limitarlo aquí
+            // por fecha_ingreso dejaba fuera a empleados nuevos con cumpleaños o
+            // aniversario próximos.
+            const proximos = await dbAll(`SELECT e.id,e.nombre,e.apellido,e.num_empleado,e.fecha_ingreso,e.fecha_nacimiento FROM empleados e ${w} ORDER BY e.fecha_ingreso ASC`, p);
+
+            // Expedientes incompletos: empleados activos a los que les falta al menos
+            // uno de los documentos considerados obligatorios para el expediente.
+            const tiposRequeridos = DOCUMENTOS_REQUERIDOS_EXPEDIENTE;
+            const filasDocumentos = await dbAll(`
+                SELECT e.id, e.nombre, e.apellido,
+                    (SELECT COUNT(DISTINCT d.tipo) FROM documentos_empleado d WHERE d.empleado_id = e.id AND d.tipo IN (${tiposRequeridos.map(() => '?').join(',')})) AS tipos_presentes
+                FROM empleados e ${w}
+            `, [...p, ...tiposRequeridos]);
+            const expedientesIncompletos = filasDocumentos.filter(f => Number(f.tipos_presentes || 0) < tiposRequeridos.length).length;
+
+            return { ok: true, data: { empleados: a.total || 0, diasDisponibles: b.total || 0, diasOtorgados: c.total || 0, pendientes: d.total || 0, proximos, expedientesIncompletos } };
+        } catch (error) {
+            return { ok: false, error: error.message };
+        }
+    });
     ipcMain.handle('auditoria:listar',async()=>{try{return {ok:true,data:await dbAll(`SELECT * FROM auditoria ORDER BY id DESC LIMIT 200`)};}catch(error){return {ok:false,error:error.message};}});
     ipcMain.handle('backup:crear',async()=>{try{const d=await dialog.showSaveDialog(mainWindow,{title:'Guardar respaldo de la base de datos',defaultPath:`RRHH_Control_backup_${new Date().toISOString().slice(0,10)}.db`,filters:[{name:'SQLite',extensions:['db']}]});if(d.canceled||!d.filePath)return {ok:false,cancelado:true};db.pragma('wal_checkpoint(TRUNCATE)');fs.copyFileSync(dbPath,d.filePath);await registrarAuditoria('Respaldo creado','Administración',d.filePath);return {ok:true,path:d.filePath};}catch(error){return {ok:false,error:error.message};}});
     ipcMain.handle('reportes:calendario-vacaciones',async(event,payload={})=>{try{const p=[];let w='';if(payload.empresaId){w='AND e.empresa_id=?';p.push(payload.empresaId);}const data=await dbAll(`SELECT s.id,s.empleado_id,s.fecha_inicio,s.fecha_fin,s.dias_solicitados,s.estado,e.nombre,e.apellido,e.num_empleado FROM solicitudes_vacaciones s JOIN empleados e ON e.id=s.empleado_id WHERE 1=1 ${w} ORDER BY s.fecha_inicio DESC`,p);return {ok:true,data};}catch(error){return {ok:false,error:error.message};}});
@@ -966,9 +1297,12 @@ function registrarHandlersIPC() {
                         continue;
                     }
 
+                    const rfcIdx = indiceCiegoCampo(rfc);
+                    const nssIdx = indiceCiegoCampo(nss);
+
                     const dupRFC = await dbGet(
-                        `SELECT id, nombre, apellido FROM empleados WHERE UPPER(TRIM(rfc)) = ? LIMIT 1`,
-                        [rfc]
+                        `SELECT id, nombre, apellido FROM empleados WHERE rfc_idx = ? LIMIT 1`,
+                        [rfcIdx]
                     );
                     if (dupRFC) {
                         errores.push(`Fila ${i + 2}: RFC ${rfc} ya pertenece a ${dupRFC.nombre} ${dupRFC.apellido}.`);
@@ -976,8 +1310,8 @@ function registrarHandlersIPC() {
                     }
 
                     const dupNSS = await dbGet(
-                        `SELECT id, nombre, apellido FROM empleados WHERE TRIM(nss) = ? LIMIT 1`,
-                        [nss]
+                        `SELECT id, nombre, apellido FROM empleados WHERE nss_idx = ? LIMIT 1`,
+                        [nssIdx]
                     );
                     if (dupNSS) {
                         errores.push(`Fila ${i + 2}: NSS ${nss} ya pertenece a ${dupNSS.nombre} ${dupNSS.apellido}.`);
@@ -997,12 +1331,12 @@ function registrarHandlersIPC() {
 
                     const resEmp = await dbRun(`
                         INSERT INTO empleados (
-                            empresa_id, num_empleado, nombre, apellido, puesto, 
-                            fecha_ingreso, salario_diario, salario_base, curp, rfc, nss, activo
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                            empresa_id, num_empleado, nombre, apellido, puesto,
+                            fecha_ingreso, salario_diario, salario_base, curp_enc, rfc_enc, rfc_idx, nss_enc, nss_idx, activo
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                     `, [
                         empresaId, num_empleado, nombre, apellido, puesto,
-                        fecha_ingreso, salario_diario, salario_base, curp, rfc, nss
+                        fecha_ingreso, salario_diario, salario_base, cifrarCampoSensible(curp), cifrarCampoSensible(rfc), rfcIdx, cifrarCampoSensible(nss), nssIdx
                     ]);
 
                     await generarSaldosVacacionesSiNoExisten(resEmp.lastID, fecha_ingreso);
@@ -1162,10 +1496,10 @@ function registrarHandlersIPC() {
                 SELECT e.*, emp.nombre as empresa_nombre 
                 FROM empleados e
                 INNER JOIN empresas emp ON e.empresa_id = emp.id
-                WHERE e.empresa_id = ? AND e.activo = 1 
+                WHERE e.empresa_id = ? AND e.activo = 1
                 ORDER BY e.apellido ASC, e.nombre ASC
             `, [empresaId]);
-            return { ok: true, data };
+            return { ok: true, data: descifrarCamposEmpleados(data) };
         } catch (error) {
             return { ok: false, error: error.message };
         }
@@ -1208,7 +1542,7 @@ function registrarHandlersIPC() {
                 ORDER BY e.apellido ASC, e.nombre ASC
                 LIMIT 50
             `, params);
-            return { ok:true, data };
+            return { ok:true, data: descifrarCamposEmpleados(data) };
         } catch(error) {
             return { ok:false, error:error.message, data:[] };
         }
@@ -1224,7 +1558,7 @@ function registrarHandlersIPC() {
                 INNER JOIN empresas emp ON e.empresa_id = emp.id
                 WHERE e.id = ?
             `, [id]);
-            return { ok: true, data };
+            return { ok: true, data: descifrarCamposEmpleado(data) };
         } catch (error) {
             return { ok: false, error: error.message };
         }
@@ -1233,10 +1567,10 @@ function registrarHandlersIPC() {
     ipcMain.removeHandler('empleados:crear');
     ipcMain.handle('empleados:crear', async (event, empleado) => {
         try {
-            const { 
-                empresa_id, num_empleado, nombre, apellido, puesto, 
+            const {
+                empresa_id, num_empleado, nombre, apellido, puesto,
                 fecha_ingreso, salario_diario, salario_base, curp, rfc, nss, edad,
-                fecha_contrato, fecha_vencimiento_contrato, ruta_contrato_pdf
+                fecha_contrato, fecha_vencimiento_contrato, ruta_contrato_pdf, fecha_nacimiento
             } = empleado;
 
             const rfcNorm = String(rfc || '').trim().toUpperCase();
@@ -1267,12 +1601,14 @@ function registrarHandlersIPC() {
             if (duplicadoExacto) {
                 return { ok:false, error:`Ya existe un registro igual para ${duplicadoExacto.nombre} ${duplicadoExacto.apellido} en esta empresa con la misma fecha de ingreso.` };
             }
+            const rfcIdx = indiceCiegoCampo(rfcNorm);
+            const nssIdx = indiceCiegoCampo(nssNorm);
             if (rfcNorm) {
-                const dup = await dbGet(`SELECT id, nombre, apellido FROM empleados WHERE UPPER(TRIM(rfc)) = ? LIMIT 1`, [rfcNorm]);
+                const dup = await dbGet(`SELECT id, nombre, apellido FROM empleados WHERE rfc_idx = ? LIMIT 1`, [rfcIdx]);
                 if (dup) return { ok:false, error:`El RFC ${rfcNorm} ya está registrado para ${dup.nombre} ${dup.apellido}.` };
             }
             if (nssNorm) {
-                const dup = await dbGet(`SELECT id, nombre, apellido FROM empleados WHERE TRIM(nss) = ? LIMIT 1`, [nssNorm]);
+                const dup = await dbGet(`SELECT id, nombre, apellido FROM empleados WHERE nss_idx = ? LIMIT 1`, [nssIdx]);
                 if (dup) return { ok:false, error:`El NSS ${nssNorm} ya está registrado para ${dup.nombre} ${dup.apellido}.` };
             }
             if (numNorm && empresa_id) {
@@ -1282,16 +1618,16 @@ function registrarHandlersIPC() {
 
             const res = await dbRun(`
                 INSERT INTO empleados (
-                    empresa_id, num_empleado, nombre, apellido, puesto, 
-                    fecha_ingreso, salario_diario, salario_base, curp, rfc, nss, edad,
-                    fecha_contrato, fecha_vencimiento_contrato, ruta_contrato_pdf
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    empresa_id, num_empleado, nombre, apellido, puesto,
+                    fecha_ingreso, salario_diario, salario_base, curp_enc, rfc_enc, rfc_idx, nss_enc, nss_idx, edad,
+                    fecha_contrato, fecha_vencimiento_contrato, ruta_contrato_pdf, fecha_nacimiento
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `, [
-                empresa_id, num_empleado, nombre, apellido, puesto, 
-                fecha_ingreso, salario_diario || 0, salario_base || 0, 
-                curp || null, rfcNorm || null, nssNorm || null, edadNum,
+                empresa_id, num_empleado, nombre, apellido, puesto,
+                fecha_ingreso, salario_diario || 0, salario_base || 0,
+                cifrarCampoSensible(curp), cifrarCampoSensible(rfcNorm), rfcIdx, cifrarCampoSensible(nssNorm), nssIdx, edadNum,
                 fecha_contrato || null, fecha_vencimiento_contrato || null,
-                ruta_contrato_pdf || ''
+                ruta_contrato_pdf || '', fecha_nacimiento || null
             ]);
 
             await generarSaldosVacacionesSiNoExisten(res.lastID, fecha_ingreso);
@@ -1313,11 +1649,11 @@ function registrarHandlersIPC() {
             const rfcNuevo = Object.prototype.hasOwnProperty.call(empleado,'rfc') ? String(empleado.rfc || '').trim().toUpperCase() : null;
             const nssNuevo = Object.prototype.hasOwnProperty.call(empleado,'nss') ? String(empleado.nss || '').trim() : null;
             if (rfcNuevo) {
-                const dup = await dbGet(`SELECT id, nombre, apellido FROM empleados WHERE id <> ? AND UPPER(TRIM(rfc)) = ? LIMIT 1`, [id, rfcNuevo]);
+                const dup = await dbGet(`SELECT id, nombre, apellido FROM empleados WHERE id <> ? AND rfc_idx = ? LIMIT 1`, [id, indiceCiegoCampo(rfcNuevo)]);
                 if (dup) return { ok:false, error:`El RFC ${rfcNuevo} ya está registrado para ${dup.nombre} ${dup.apellido}.` };
             }
             if (nssNuevo) {
-                const dup = await dbGet(`SELECT id, nombre, apellido FROM empleados WHERE id <> ? AND TRIM(nss) = ? LIMIT 1`, [id, nssNuevo]);
+                const dup = await dbGet(`SELECT id, nombre, apellido FROM empleados WHERE id <> ? AND nss_idx = ? LIMIT 1`, [id, indiceCiegoCampo(nssNuevo)]);
                 if (dup) return { ok:false, error:`El NSS ${nssNuevo} ya está registrado para ${dup.nombre} ${dup.apellido}.` };
             }
 
@@ -1331,19 +1667,30 @@ function registrarHandlersIPC() {
                 fecha_ingreso: empleado.fecha_ingreso,
                 salario_diario: empleado.salario_diario,
                 salario_base: empleado.salario_base,
-                curp: empleado.curp,
-                rfc: empleado.rfc,
-                nss: empleado.nss,
                 edad: empleado.edad,
                 fecha_contrato: empleado.fecha_contrato,
                 fecha_vencimiento_contrato: empleado.fecha_vencimiento_contrato,
-                ruta_contrato_pdf: empleado.ruta_contrato_pdf
+                ruta_contrato_pdf: empleado.ruta_contrato_pdf,
+                fecha_nacimiento: empleado.fecha_nacimiento
             };
             const sets=[]; const params=[];
             for (const [campo,valor] of Object.entries(camposPermitidos)) {
                 if (Object.prototype.hasOwnProperty.call(empleado,campo)) {
-                    sets.push(`${campo} = ?`); params.push(valor === undefined ? null : (campo === 'rfc' ? (String(valor).trim().toUpperCase() || null) : (campo === 'nss' ? (String(valor).trim() || null) : valor)));
+                    sets.push(`${campo} = ?`); params.push(valor === undefined ? null : valor);
                 }
+            }
+            if (Object.prototype.hasOwnProperty.call(empleado,'rfc')) {
+                sets.push('rfc_enc = ?', 'rfc_idx = ?');
+                params.push(rfcNuevo ? cifrarCampoSensible(rfcNuevo) : null, rfcNuevo ? indiceCiegoCampo(rfcNuevo) : null);
+            }
+            if (Object.prototype.hasOwnProperty.call(empleado,'nss')) {
+                sets.push('nss_enc = ?', 'nss_idx = ?');
+                params.push(nssNuevo ? cifrarCampoSensible(nssNuevo) : null, nssNuevo ? indiceCiegoCampo(nssNuevo) : null);
+            }
+            if (Object.prototype.hasOwnProperty.call(empleado,'curp')) {
+                const curpNuevo = String(empleado.curp || '').trim().toUpperCase();
+                sets.push('curp_enc = ?');
+                params.push(curpNuevo ? cifrarCampoSensible(curpNuevo) : null);
             }
             if (!sets.length) return { ok: false, error: 'No hay campos para actualizar.' };
             params.push(id);
@@ -1519,6 +1866,98 @@ function registrarHandlersIPC() {
             };
         } catch (error) {
             return { ok:false, error:error.message };
+        }
+    });
+
+    // ==========================================
+    // EXPEDIENTE DIGITAL: documentos adjuntos por empleado
+    // ==========================================
+    ipcMain.removeHandler('documentos:catalogo-tipos');
+    ipcMain.handle('documentos:catalogo-tipos', async () => {
+        return { ok: true, data: CATALOGO_TIPOS_DOCUMENTO, requeridos: DOCUMENTOS_REQUERIDOS_EXPEDIENTE };
+    });
+
+    ipcMain.removeHandler('documentos:listar');
+    ipcMain.handle('documentos:listar', async (event, empleadoId) => {
+        try {
+            const id = Number(empleadoId);
+            if (!id) return { ok: false, error: 'Empleado no especificado.', data: [] };
+            const data = await dbAll(`SELECT id, empleado_id, tipo, nombre_original, extension, fecha_subida FROM documentos_empleado WHERE empleado_id = ? ORDER BY fecha_subida DESC`, [id]);
+            return { ok: true, data };
+        } catch (error) {
+            return { ok: false, error: error.message, data: [] };
+        }
+    });
+
+    ipcMain.removeHandler('documentos:subir');
+    ipcMain.handle('documentos:subir', async (event, payload = {}) => {
+        try {
+            const empleadoId = Number(payload.empleadoId);
+            const tipo = String(payload.tipo || '').trim().toUpperCase();
+            if (!empleadoId) return { ok: false, error: 'Empleado no especificado.' };
+            if (!CATALOGO_TIPOS_DOCUMENTO[tipo]) return { ok: false, error: 'Tipo de documento no reconocido.' };
+
+            const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+                title: `Seleccionar documento: ${CATALOGO_TIPOS_DOCUMENTO[tipo]}`,
+                filters: [{ name: 'Documentos', extensions: ['pdf', 'jpg', 'jpeg', 'png'] }],
+                properties: ['openFile']
+            });
+            if (canceled || !filePaths.length) return { ok: false, cancelado: true };
+
+            const rutaOrigen = filePaths[0];
+            const extension = path.extname(rutaOrigen).toLowerCase().replace('.', '');
+            if (!['pdf', 'jpg', 'jpeg', 'png'].includes(extension)) {
+                return { ok: false, error: 'Formato no soportado. Usa PDF, JPG o PNG.' };
+            }
+
+            const bufferOriginal = fs.readFileSync(rutaOrigen);
+            const bufferCifrado = cifrarBufferArchivo(bufferOriginal);
+            const nombreArchivo = `${crypto.randomUUID()}.enc`;
+            fs.writeFileSync(path.join(carpetaExpedienteEmpleado(empleadoId), nombreArchivo), bufferCifrado);
+
+            const res = await dbRun(
+                `INSERT INTO documentos_empleado (empleado_id, tipo, nombre_original, extension, archivo_cifrado) VALUES (?, ?, ?, ?, ?)`,
+                [empleadoId, tipo, path.basename(rutaOrigen), extension, nombreArchivo]
+            );
+            await registrarAuditoria('Documento agregado al expediente', 'Expediente', `Empleado ID ${empleadoId} · ${CATALOGO_TIPOS_DOCUMENTO[tipo]}`);
+            return { ok: true, id: res.lastID };
+        } catch (error) {
+            return { ok: false, error: error.message };
+        }
+    });
+
+    ipcMain.removeHandler('documentos:abrir');
+    ipcMain.handle('documentos:abrir', async (event, documentoId) => {
+        try {
+            const doc = await dbGet(`SELECT * FROM documentos_empleado WHERE id = ?`, [Number(documentoId)]);
+            if (!doc) return { ok: false, error: 'Documento no encontrado.' };
+            const rutaCifrada = path.join(carpetaExpedienteEmpleado(doc.empleado_id), doc.archivo_cifrado);
+            if (!fs.existsSync(rutaCifrada)) return { ok: false, error: 'El archivo ya no existe en el equipo.' };
+            const bufferPlano = descifrarBufferArchivo(fs.readFileSync(rutaCifrada));
+
+            const dirTemp = path.join(os.tmpdir(), 'rrhh-control-expedientes');
+            fs.mkdirSync(dirTemp, { recursive: true });
+            const rutaTemp = path.join(dirTemp, `${crypto.randomUUID()}.${doc.extension || 'pdf'}`);
+            fs.writeFileSync(rutaTemp, bufferPlano);
+            await shell.openPath(rutaTemp);
+            return { ok: true };
+        } catch (error) {
+            return { ok: false, error: error.message };
+        }
+    });
+
+    ipcMain.removeHandler('documentos:eliminar');
+    ipcMain.handle('documentos:eliminar', async (event, documentoId) => {
+        try {
+            const doc = await dbGet(`SELECT * FROM documentos_empleado WHERE id = ?`, [Number(documentoId)]);
+            if (!doc) return { ok: false, error: 'Documento no encontrado.' };
+            const rutaCifrada = path.join(carpetaExpedienteEmpleado(doc.empleado_id), doc.archivo_cifrado);
+            if (fs.existsSync(rutaCifrada)) { try { fs.unlinkSync(rutaCifrada); } catch (_) {} }
+            await dbRun(`DELETE FROM documentos_empleado WHERE id = ?`, [doc.id]);
+            await registrarAuditoria('Documento eliminado del expediente', 'Expediente', `Empleado ID ${doc.empleado_id} · ${CATALOGO_TIPOS_DOCUMENTO[doc.tipo] || doc.tipo}`);
+            return { ok: true };
+        } catch (error) {
+            return { ok: false, error: error.message };
         }
     });
 
@@ -2417,7 +2856,7 @@ ipcMain.handle('incidencias:obtener-por-empleado', async (event,payload)=>{
             const params = [];
             if (empresaId) { where.push('e.empresa_id = ?'); params.push(empresaId); }
             const rows = await dbAll(`
-                SELECT e.num_empleado, e.nombre, e.apellido, e.rfc, e.curp, e.nss, e.puesto,
+                SELECT e.num_empleado, e.nombre, e.apellido, e.rfc_enc, e.curp_enc, e.nss_enc, e.puesto,
                        e.fecha_ingreso, e.salario_diario, em.nombre AS empresa_nombre
                 FROM empleados e
                 LEFT JOIN empresas em ON em.id = e.empresa_id
@@ -2428,9 +2867,9 @@ ipcMain.handle('incidencias:obtener-por-empleado', async (event,payload)=>{
                 'Código': r.num_empleado || '',
                 'Nombre(s)': r.nombre || '',
                 'Apellidos': r.apellido || '',
-                'RFC': r.rfc || '',
-                'CURP': r.curp || '',
-                'NSS': r.nss || '',
+                'RFC': descifrarCampoSensible(r.rfc_enc) || '',
+                'CURP': descifrarCampoSensible(r.curp_enc) || '',
+                'NSS': descifrarCampoSensible(r.nss_enc) || '',
                 'Puesto': r.puesto || '',
                 'Fecha Ingreso': r.fecha_ingreso || '',
                 'Salario Diario': Number(r.salario_diario || 0),
@@ -2571,14 +3010,14 @@ ipcMain.handle('incidencias:obtener-por-empleado', async (event,payload)=>{
             if (empresaId) { whereBaja.push('e.empresa_id = ?'); paramsBaja.push(empresaId); }
 
             const rows = await dbAll(`
-                SELECT e.num_empleado, (e.nombre || ' ' || e.apellido) AS nombre, e.rfc, e.nss, e.puesto,
+                SELECT e.num_empleado, (e.nombre || ' ' || e.apellido) AS nombre, e.rfc_enc, e.nss_enc, e.puesto,
                        e.salario_diario, 'ALTA' AS tipo, e.fecha_ingreso AS fecha
                 FROM empleados e
                 WHERE ${whereAlta.join(' AND ')}
 
                 UNION ALL
 
-                SELECT e.num_empleado, (e.nombre || ' ' || e.apellido) AS nombre, e.rfc, e.nss, e.puesto,
+                SELECT e.num_empleado, (e.nombre || ' ' || e.apellido) AS nombre, e.rfc_enc, e.nss_enc, e.puesto,
                        e.salario_diario, 'BAJA' AS tipo, e.fecha_baja AS fecha
                 FROM empleados e
                 WHERE ${whereBaja.join(' AND ')}
@@ -2589,8 +3028,8 @@ ipcMain.handle('incidencias:obtener-por-empleado', async (event,payload)=>{
             const data = rows.map(r => ({
                 'Código': r.num_empleado || '',
                 'Nombre': r.nombre || '',
-                'RFC': r.rfc || '',
-                'NSS': r.nss || '',
+                'RFC': descifrarCampoSensible(r.rfc_enc) || '',
+                'NSS': descifrarCampoSensible(r.nss_enc) || '',
                 'Puesto': r.puesto || '',
                 'Movimiento': r.tipo,
                 'Fecha': r.fecha || '',
@@ -2716,7 +3155,7 @@ ipcMain.handle('incidencias:obtener-por-empleado', async (event,payload)=>{
             }
 
             let existente = null;
-            if (f.rfc) existente = await dbGet(`SELECT id FROM empleados WHERE UPPER(TRIM(rfc)) = ? LIMIT 1`, [f.rfc]);
+            if (f.rfc) existente = await dbGet(`SELECT id FROM empleados WHERE rfc_idx = ? LIMIT 1`, [indiceCiegoCampo(f.rfc)]);
             if (!existente && f.codigo) existente = await dbGet(`SELECT id FROM empleados WHERE empresa_id = ? AND UPPER(TRIM(num_empleado)) = ? LIMIT 1`, [empId, f.codigo.toUpperCase()]);
 
             if (existente) {
@@ -2798,15 +3237,15 @@ ipcMain.handle('incidencias:obtener-por-empleado', async (event,payload)=>{
                     }
 
                     let existente = null;
-                    if (f.rfc) existente = await dbGet(`SELECT * FROM empleados WHERE UPPER(TRIM(rfc)) = ? LIMIT 1`, [f.rfc]);
+                    if (f.rfc) existente = await dbGet(`SELECT * FROM empleados WHERE rfc_idx = ? LIMIT 1`, [indiceCiegoCampo(f.rfc)]);
                     if (!existente && f.codigo) existente = await dbGet(`SELECT * FROM empleados WHERE empresa_id = ? AND UPPER(TRIM(num_empleado)) = ? LIMIT 1`, [empId, f.codigo.toUpperCase()]);
 
                     if (existente) {
                         const cambios = {};
                         if (f.nombre) cambios.nombre = f.nombre;
                         if (f.apellido) cambios.apellido = f.apellido;
-                        if (f.curp) cambios.curp = f.curp;
-                        if (f.nss) cambios.nss = f.nss;
+                        if (f.curp) cambios.curp_enc = cifrarCampoSensible(f.curp);
+                        if (f.nss) { cambios.nss_enc = cifrarCampoSensible(f.nss); cambios.nss_idx = indiceCiegoCampo(f.nss); }
                         if (f.puesto) cambios.puesto = f.puesto;
                         if (f.fechaIngreso) cambios.fecha_ingreso = f.fechaIngreso;
                         if (f.salario > 0) cambios.salario_diario = f.salario;
@@ -2826,9 +3265,9 @@ ipcMain.handle('incidencias:obtener-por-empleado', async (event,payload)=>{
                         }
                         const fechaIngreso = f.fechaIngreso || obtenerFechaLocal();
                         const resEmp = await dbRun(`
-                            INSERT INTO empleados (empresa_id, num_empleado, nombre, apellido, puesto, fecha_ingreso, salario_diario, curp, rfc, nss, activo)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-                        `, [empId, f.codigo, f.nombre, f.apellido, f.puesto || 'General', fechaIngreso, f.salario, f.curp, f.rfc, f.nss]);
+                            INSERT INTO empleados (empresa_id, num_empleado, nombre, apellido, puesto, fecha_ingreso, salario_diario, curp_enc, rfc_enc, rfc_idx, nss_enc, nss_idx, activo)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        `, [empId, f.codigo, f.nombre, f.apellido, f.puesto || 'General', fechaIngreso, f.salario, cifrarCampoSensible(f.curp), cifrarCampoSensible(f.rfc), indiceCiegoCampo(f.rfc), cifrarCampoSensible(f.nss), indiceCiegoCampo(f.nss)]);
                         await generarSaldosVacacionesSiNoExisten(resEmp.lastID, fechaIngreso);
                         creados++;
                     }
@@ -2944,7 +3383,7 @@ app.on('window-all-closed', () => {
 ipcMain.handle('incidencias:obtener-pdf', async (event, id) => {
   try {
     const row = db.prepare(`
-      SELECT i.*, e.nombre, e.apellido, e.num_empleado, e.rfc, e.nss,
+      SELECT i.*, e.nombre, e.apellido, e.num_empleado, e.rfc_enc, e.nss_enc,
              em.nombre AS empresa_nombre
       FROM incidencias i
       JOIN empleados e ON e.id=i.empleado_id
@@ -2952,6 +3391,8 @@ ipcMain.handle('incidencias:obtener-pdf', async (event, id) => {
       WHERE i.id=?
     `).get(id);
     if (!row) throw new Error('Incidencia no encontrada');
+    row.rfc = descifrarCampoSensible(row.rfc_enc);
+    row.nss = descifrarCampoSensible(row.nss_enc);
     const saldos = db.prepare(`
       SELECT ciclo,dias_otorgados,dias_consumidos,dias_disponibles,fecha_disponible
       FROM saldos_vacaciones WHERE empleado_id=? ORDER BY fecha_disponible,ciclo
@@ -2992,7 +3433,7 @@ ipcMain.handle('incidencias:obtener-pdf', async (event, id) => {
 ipcMain.handle('incidencias:obtener-pdf-v8', async (event, id) => {
   try {
     const incidencia = db.prepare(`
-      SELECT i.*, e.nombre, e.apellido, e.num_empleado, e.rfc, e.nss,
+      SELECT i.*, e.nombre, e.apellido, e.num_empleado, e.rfc_enc, e.nss_enc,
              em.nombre AS empresa_nombre
       FROM incidencias i
       JOIN empleados e ON e.id = i.empleado_id
@@ -3000,6 +3441,8 @@ ipcMain.handle('incidencias:obtener-pdf-v8', async (event, id) => {
       WHERE i.id = ?
     `).get(id);
     if (!incidencia) throw new Error('Incidencia no encontrada.');
+    incidencia.rfc = descifrarCampoSensible(incidencia.rfc_enc);
+    incidencia.nss = descifrarCampoSensible(incidencia.nss_enc);
 
     const saldos = db.prepare(`
       SELECT ciclo, dias_otorgados, dias_consumidos, dias_disponibles, fecha_disponible
@@ -3098,8 +3541,8 @@ ipcMain.handle('incidencias:exportar-pdf-v11', async (event, incidenciaId) => {
              e.nombre AS empleado_nombre,
              e.apellido AS empleado_apellido,
              e.num_empleado,
-             e.rfc,
-             e.nss,
+             e.rfc_enc,
+             e.nss_enc,
              em.id AS empresa_id_logo,
              em.nombre AS empresa_nombre
       FROM incidencias i
@@ -3109,6 +3552,8 @@ ipcMain.handle('incidencias:exportar-pdf-v11', async (event, incidenciaId) => {
     `).get(id);
 
     if (!info) throw new Error('No se encontró la incidencia seleccionada.');
+    info.rfc = descifrarCampoSensible(info.rfc_enc);
+    info.nss = descifrarCampoSensible(info.nss_enc);
 
     let saldos = [];
     try {
