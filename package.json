@@ -1,0 +1,63 @@
+{
+  "name": "sistema-de-vacaciones",
+  "version": "1.0.0",
+  "description": "Sistema Integrado de RRHH, Vacaciones y Expediente Digital Multi-Empresa",
+  "main": "main.js",
+  "author": "RRHH Control",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Vargas9973-boop/sistema_de_vacaciones.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "rebuild": "electron-rebuild",
+    "dist": "electron-builder",
+    "release": "electron-builder --publish always"
+  },
+  "keywords": [
+    "electron",
+    "rrhh",
+    "vacaciones",
+    "better-sqlite3",
+    "expediente-digital"
+  ],
+  "dependencies": {
+    "@fortawesome/fontawesome-free": "^6.4.0",
+    "better-sqlite3-multiple-ciphers": "^12.11.1",
+    "electron-updater": "^6.3.9",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
+    "electron": "^33.4.2",
+    "electron-builder": "^25.1.8"
+  },
+  "allowScripts": {
+    "better-sqlite3-multiple-ciphers@12.11.1": true,
+    "electron@33.4.11": true
+  },
+  "build": {
+    "appId": "com.rrhhcontrol.sistemavacaciones",
+    "productName": "Sistema de Vacaciones",
+    "files": [
+      "**/*",
+      "!**/*.xlsx",
+      "!.github/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "logo.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Vargas9973-boop",
+      "repo": "sistema_de_vacaciones"
+    }
+  }
+}

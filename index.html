@@ -1,0 +1,1085 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' 'unsafe-inline';
+                 style-src 'self' 'unsafe-inline';
+                 font-src 'self' data:;">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sistema Integrado de RRHH & Nómina</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="vendor/fontawesome/all.min.css" />
+  <style>
+    /* Estilos para el autocompletado y búsqueda dinámica */
+    .search-container { position: relative; width: 100%; }
+    .search-results {
+      position: absolute; top: 100%; left: 0; right: 0; background: #fff;
+      border: 1px solid #cbd5e1; border-radius: 0 0 6px 6px; max-height: 200px;
+      overflow-y: auto; z-index: 1000; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: none;
+    }
+    .search-item { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #f1f5f9; }
+    .search-item:hover { background-color: #f0f9ff; }
+
+    /* Estilos para el Menú Desplegable de Filtros Avanzados */
+    .dropdown-filter-container { position: relative; display: inline-block; }
+    .dropdown-filter-menu {
+      display: none;
+      position: absolute;
+      right: 0;
+      top: 105%;
+      background: #ffffff;
+      min-width: 320px;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1);
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 16px;
+      z-index: 1050;
+    }
+    .dropdown-filter-menu.show { display: block; }
+    .filter-group { margin-bottom: 12px; }
+    .filter-group label { display: block; font-size: 0.82rem; font-weight: 600; color: #475569; margin-bottom: 4px; }
+    .filter-range { display: flex; align-items: center; gap: 8px; }
+    .filter-range input { width: 100%; font-size: 0.85rem; padding: 6px 8px; }
+    .filter-actions { display: flex; justify-content: space-between; gap: 10px; margin-top: 15px; padding-top: 10px; border-top: 1px solid #f1f5f9; }
+  </style>
+</head>
+<body>
+  <div id="loginOverlay" class="login-overlay">
+    <div class="login-card">
+      <div class="login-logo"><i class="fa-solid fa-user-shield"></i></div>
+      <h1>RRHH Control</h1>
+      <p>Acceso administrativo seguro</p>
+      <form id="formLoginAdmin">
+        <label>Usuario</label>
+        <input id="loginUsuario" class="form-control" placeholder="Usuario" autocomplete="username" required>
+        <label>Contraseña</label>
+        <div class="password-wrap"><input id="loginPassword" class="form-control" type="password" autocomplete="current-password" required><button type="button" id="btnMostrarPassword" class="password-toggle"><i class="fa-solid fa-eye"></i></button></div>
+        <button class="btn btn-primary login-btn" type="submit"><i class="fa-solid fa-right-to-bracket"></i> Ingresar</button>
+<div id="loginMensaje" class="login-message"></div>
+      </form>
+      <small>Cuenta única: Administrador</small>
+    </div>
+  </div>
+
+  <div id="modalPassword" class="modal-overlay" style="display:none;">
+    <div class="modal-card">
+      <h3><i class="fa-solid fa-key"></i> Cambiar contraseña</h3>
+      <p>Por seguridad, actualiza la contraseña del administrador.</p>
+      <input id="passwordActual" class="form-control" type="password" placeholder="Contraseña actual">
+      <input id="passwordNueva" class="form-control" type="password" placeholder="Nueva contraseña (mínimo 8 caracteres)">
+      <input id="passwordNueva2" class="form-control" type="password" placeholder="Confirmar nueva contraseña">
+      <div id="passwordMensaje" class="login-message"></div>
+      <div class="modal-actions"><button id="btnGuardarPassword" class="btn btn-primary">Guardar contraseña</button>
+<button id="btnCerrarPassword" class="btn btn-secondary">Después</button></div>
+    </div>
+  </div>
+
+  <div id="modalEmpresa" class="modal-overlay" style="display:none;">
+    <div class="modal-card">
+      <h3 id="modalEmpresaTitulo"><i class="fa-solid fa-building"></i> Nueva empresa</h3>
+      <p>El nombre debe ser único entre todas las empresas registradas.</p>
+      <input type="hidden" id="empresaIdEdicion" value="">
+      <input id="empresaNombreInput" class="form-control" type="text" placeholder="Nombre de la empresa" maxlength="150">
+      <input id="empresaRfcInput" class="form-control" type="text" placeholder="RFC (opcional)" maxlength="13" style="text-transform:uppercase;">
+      <label style="display:block;margin-top:10px;font-size:.82rem;font-weight:600;color:#475569;">Logotipo (se usa en reportes y PDF de esta empresa)</label>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:6px;">
+        <img id="empresaLogoPreview" src="" alt="Logotipo" style="width:56px;height:56px;object-fit:contain;border:1px solid #dbe4e8;border-radius:8px;background:#f8fafc;flex-shrink:0;">
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <div style="display:flex;gap:8px;">
+            <button type="button" id="btnSeleccionarLogoEmpresa" class="btn btn-secondary" style="padding:6px 12px;font-size:.8rem;"><i class="fa-solid fa-image"></i> Seleccionar logotipo</button>
+            <button type="button" id="btnQuitarLogoEmpresa" class="btn" style="padding:6px 12px;font-size:.8rem;background-color:#fee2e2;color:#b91c1c;border:none;display:none;"><i class="fa-solid fa-trash"></i> Quitar</button>
+          </div>
+          <small style="color:#94a3b8;">Si no se selecciona uno, se usará el logotipo del sistema por defecto.</small>
+        </div>
+      </div>
+      <input type="hidden" id="empresaLogoRutaTemporal" value="">
+      <input type="hidden" id="empresaLogoEliminar" value="0">
+      <div id="empresaModalMensaje" class="login-message"></div>
+      <div class="modal-actions">
+        <button id="btnGuardarEmpresa" class="btn btn-primary">Guardar empresa</button>
+        <button id="btnCerrarModalEmpresa" class="btn btn-secondary">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modalFormatoFecha" class="modal-overlay" style="display:none;">
+    <div class="modal-card">
+      <h3><i class="fa-solid fa-calendar-question"></i> Formato de fecha ambiguo</h3>
+      <p id="modalFormatoFechaMensaje">Se detectaron fechas en el archivo que pueden interpretarse de dos formas distintas. ¿Qué formato usa tu archivo?</p>
+      <div class="modal-actions" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <button id="btnFormatoFechaDMY" class="btn btn-primary">Día/Mes/Año (recomendado)</button>
+        <button id="btnFormatoFechaMDY" class="btn btn-secondary">Mes/Día/Año</button>
+        <button id="btnFormatoFechaCancelar" class="btn btn-secondary">Cancelar importación</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="overlayProcesoMasivo" style="display:none;position:fixed;inset:0;z-index:2147483000;background:rgba(15,23,42,.55);align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:14px;padding:28px 34px;box-shadow:0 20px 50px rgba(0,0,0,.25);text-align:center;max-width:380px;">
+      <i class="fa-solid fa-spinner fa-spin" style="font-size:28px;color:#0f766e;"></i>
+      <p id="overlayProcesoMasivoMensaje" style="margin:14px 0 0;color:#1e293b;font-weight:600;">Procesando...</p>
+      <p style="margin:8px 0 0;color:#64748b;font-size:.85rem;">Espera a que termine antes de realizar otra acción.</p>
+    </div>
+  </div>
+
+  <div class="app-container">
+
+    <!-- MENÚ LATERAL -->
+    <aside class="sidebar">
+      <div class="brand">
+        <i class="fa-solid fa-users-gear brand-icon"></i>
+        <h2>RRHH Control</h2>
+      </div>
+
+      <!-- Selector Global de Empresa -->
+      <div class="company-selector-container">
+        <label for="selectEmpresaGlobal"><i class="fa-solid fa-building"></i> Empresa:</label>
+        <select id="selectEmpresaGlobal" class="form-control"></select>
+      </div>
+
+      <nav class="sidebar-nav">
+        <ul>
+          <li class="nav-item active" data-target="mod-dashboard"><i class="fa-solid fa-gauge-high"></i><span>Panorama Laboral</span></li>
+          <li class="nav-item" data-target="mod-expediente">
+            <i class="fa-solid fa-id-card"></i>
+            <span>Expediente Digital</span>
+          </li>
+          <li class="nav-item" data-target="mod-vacaciones">
+            <i class="fa-solid fa-umbrella-beach"></i>
+            <span>Vacaciones</span>
+          </li>
+          <li class="nav-item" data-target="mod-finiquitos">
+            <i class="fa-solid fa-calculator"></i>
+            <span>Finiquitos y Liquidaciones</span>
+          </li>
+          <li class="nav-item" data-target="mod-salarios">
+            <i class="fa-solid fa-sack-dollar"></i>
+            <span>Integración de Salarios</span>
+          </li>
+          <li class="nav-item" data-target="mod-aguinaldos">
+            <i class="fa-solid fa-gift"></i>
+            <span>Aguinaldos</span>
+          </li>
+          <li class="nav-item" data-target="mod-incidencias">
+<i class="fa-solid fa-calendar-check"></i>
+            <span>Incidencias y Asistencia</span>
+          </li>
+          <li class="nav-item" data-target="mod-contratos">
+            <i class="fa-solid fa-file-contract"></i>
+            <span>Contratos</span>
+          </li>
+          <li class="nav-item" data-target="mod-reportes"><i class="fa-solid fa-chart-line"></i><span>Reportes & Exportación</span></li>
+          <li class="nav-item" data-target="mod-contpaqi"><i class="fa-solid fa-file-export"></i><span>Complemento CONTPAQi</span></li>
+          <li class="nav-item" data-target="mod-calendario"><i class="fa-solid fa-calendar-days"></i><span>Calendario</span></li>
+          <li class="nav-item" data-target="mod-perfil"><i class="fa-solid fa-user-tie"></i><span>Ficha del Empleado</span></li>
+          <li class="nav-item nav-separator" data-target="mod-admin"><i class="fa-solid fa-shield-halved"></i><span>Administración</span></li>
+        </ul>
+      </nav>
+
+      <div class="sidebar-footer">
+        <span class="status-indicator online"></span> SQLite Conectado
+      </div>
+    </aside>
+
+    <!-- ÁREA DE CONTENIDO PRINCIPAL -->
+    <main class="content-area">
+      <div class="topbar"><div><span class="eyebrow">SISTEMA INTEGRADO DE RRHH</span><strong id="empresaActualLabel">Panel administrativo</strong></div><div class="topbar-user"><i class="fa-solid fa-circle-user"></i><span>Administrador</span><button id="btnCambiarPasswordTop" class="icon-btn" title="Cambiar contraseña"><i class="fa-solid fa-key"></i></button></div></div>
+
+      <section id="mod-dashboard" class="module-view active">
+
+        <!-- PANORAMA LABORAL: cabecera dinámica tipo "centro de mando" -->
+        <div class="panorama-hero">
+          <div class="panorama-hero-glow"></div>
+          <div class="panorama-hero-main">
+            <span class="panorama-eyebrow"><i class="fa-solid fa-satellite-dish"></i> PANORAMA LABORAL <span class="panorama-live-dot" title="Datos en vivo"></span></span>
+            <h1 id="panoramaSaludo">Buen día</h1>
+            <p id="panoramaSubtitulo">Así luce hoy la operación de Recursos Humanos<span id="panoramaEmpresaTxt"></span>.</p>
+          </div>
+          <div class="panorama-hero-clock">
+            <strong id="panoramaHora">--:--:--</strong>
+            <span id="panoramaFecha">—</span>
+          </div>
+        </div>
+
+        <div class="stats-grid panorama-stats">
+          <div class="stat-card panorama-stat tono-teal">
+            <div class="stat-icon"><i class="fa-solid fa-users"></i></div>
+            <div><span>Empleados activos</span><strong id="dashEmpleados">0</strong></div>
+            <div class="stat-glyph"><i class="fa-solid fa-building-user"></i></div>
+          </div>
+          <div class="stat-card panorama-stat tono-azul">
+            <div class="stat-icon"><i class="fa-solid fa-umbrella-beach"></i></div>
+            <div><span>Días disponibles</span><strong id="dashDisponibles">0</strong></div>
+            <div class="stat-glyph"><i class="fa-solid fa-sun"></i></div>
+          </div>
+          <div class="stat-card panorama-stat tono-ambar">
+            <div class="stat-icon"><i class="fa-solid fa-calendar-check"></i></div>
+            <div><span>Días otorgados</span><strong id="dashOtorgados">0</strong></div>
+            <div class="stat-glyph"><i class="fa-solid fa-plane-departure"></i></div>
+          </div>
+          <div class="stat-card panorama-stat tono-rojo">
+            <div class="stat-icon"><i class="fa-solid fa-clock"></i></div>
+            <div><span>Solicitudes pendientes</span><strong id="dashPendientes">0</strong></div>
+            <div class="stat-glyph"><i class="fa-solid fa-hourglass-half"></i></div>
+          </div>
+        </div>
+
+        <div class="panorama-executive-row">
+          <div class="panorama-executive-card">
+            <div class="executive-label"><i class="fa-solid fa-briefcase"></i> Estado de la operación</div>
+            <strong id="panoramaEstadoOperacion">Operación estable</strong>
+            <span id="panoramaEstadoDetalle">Sin alertas críticas registradas.</span>
+          </div>
+          <div class="panorama-executive-card">
+            <div class="executive-label"><i class="fa-solid fa-calendar-days"></i> Cobertura de vacaciones</div>
+            <strong id="panoramaCobertura">0%</strong>
+            <span>Disponibles frente a días otorgados</span>
+          </div>
+          <div class="panorama-executive-card">
+            <div class="executive-label"><i class="fa-solid fa-triangle-exclamation"></i> Atención prioritaria</div>
+            <strong id="panoramaPrioridad">Sin pendientes</strong>
+            <span id="panoramaPrioridadDetalle">El equipo está al día.</span>
+          </div>
+        </div>
+
+        <div class="panorama-grid">
+          <div class="card panorama-balance-card">
+            <div class="section-title"><h3><i class="fa-solid fa-scale-balanced"></i> Balance de vacaciones</h3></div>
+            <div class="panorama-donut-wrap">
+              <svg viewBox="0 0 36 36" class="panorama-donut">
+                <path class="donut-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                <path id="panoramaDonutValue" class="donut-value" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                <text x="18" y="20.7" class="donut-text" id="panoramaDonutPct">0%</text>
+              </svg>
+              <div class="panorama-donut-legend">
+                <div><span class="dot dot-primary"></span> Disponibles <strong id="panoramaLeyDisponibles">0</strong></div>
+                <div><span class="dot dot-muted"></span> Otorgados <strong id="panoramaLeyOtorgados">0</strong></div>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="section-title"><h3><i class="fa-solid fa-bell"></i> Alertas y pendientes</h3></div>
+            <div id="dashAlertas" class="alerts-list"></div>
+          </div>
+          <div class="card panorama-timeline-card">
+            <div class="section-title"><h3><i class="fa-solid fa-cake-candles"></i> Próximas antigüedades</h3></div>
+            <div id="dashProximos" class="timeline-proximos"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="mod-perfil" class="module-view">
+        <header class="module-header"><h1><i class="fa-solid fa-user-tie"></i> Ficha profesional del empleado</h1><p>Consulta centralizada de información laboral y vacaciones.</p></header>
+        <div class="card"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><div class="search-container profile-search" style="flex:1;min-width:280px;"><input id="perfilBusqueda" class="form-control" placeholder="Buscar empleado por nombre, ID o puesto..." autocomplete="off"><div id="perfilResultados" class="search-results"></div></div><button type="button" id="btnExportarFichaPdf" class="btn btn-primary" disabled><i class="fa-solid fa-file-pdf"></i> Exportar ficha a PDF</button></div></div>
+        <div id="perfilContenido" class="profile-empty"><i class="fa-solid fa-user-magnifying-glass"></i><p>Selecciona un empleado para consultar su ficha.</p></div>
+      </section>
+
+      <section id="mod-calendario" class="module-view">
+        <header class="module-header"><h1><i class="fa-solid fa-calendar-days"></i> Calendario de vacaciones</h1><p>Vista consolidada de ausencias y solicitudes por empleado.</p></header>
+        <div class="calendar-professional card">
+          <div class="calendar-left">
+            <div class="calendar-toolbar"><div><strong>Vacaciones registradas</strong><span id="calendarioResumen"></span></div><button id="btnActualizarCalendario" class="btn btn-primary"><i class="fa-solid fa-rotate"></i> Actualizar</button></div>
+            <div class="table-responsive">
+<table class="data-table"><thead><tr><th>Empleado</th><th>Inicio</th><th>Fin</th><th>Días</th><th>Estado</th></tr></thead><tbody id="tablaCalendario"></tbody></table></div>
+          </div>
+          <aside class="calendar-right"><div class="calendar-right-header"><i class="fa-solid fa-list-check"></i><div><strong>Detalle de vacaciones</strong><span>Resumen de los registros más recientes</span></div></div><div id="calendarioDetalle" class="calendar-detail-list"><div class="calendar-empty">Pulsa Actualizar para cargar la información.</div></div></aside>
+        </div>
+      </section>
+
+      <section id="mod-admin" class="module-view">
+        <header class="module-header"><h1><i class="fa-solid fa-shield-halved"></i> Administración y seguridad</h1><p>Configuración del único usuario administrador, auditoría y respaldos.</p></header>
+        <div class="admin-grid">
+          <div class="card admin-card"><h3><i class="fa-solid fa-user-lock"></i> Usuario administrador</h3><p>El sistema utiliza una sola cuenta con privilegios administrativos.</p><div class="admin-user-row"><strong>admin</strong><span class="badge badge-success">ÚNICA CUENTA</span></div><button id="btnCambiarPasswordAdmin" class="btn btn-primary">Cambiar contraseña</button></div>
+          <div class="card admin-card"><h3><i class="fa-solid fa-database"></i> Respaldos</h3><p>Genera una copia segura de la base de datos SQLite.</p><button id="btnCrearBackup" class="btn btn-primary"><i class="fa-solid fa-download"></i> Crear respaldo</button><div id="backupMensaje" class="small-message"></div></div>
+        </div>
+        <div class="card">
+          <div class="section-title"><h3><i class="fa-solid fa-building"></i> Empresas</h3><button id="btnNuevaEmpresa" class="btn btn-primary"><i class="fa-solid fa-plus"></i> Nueva empresa</button></div>
+          <div class="table-responsive"><table class="data-table"><thead><tr><th>Logotipo</th><th>Nombre</th><th>RFC</th><th>Acciones</th></tr></thead><tbody id="tablaEmpresasAdmin"></tbody></table></div>
+        </div>
+        <div class="card"><div class="section-title"><h3><i class="fa-solid fa-list-check"></i> Bitácora de auditoría</h3><button id="btnActualizarAuditoria" class="btn btn-secondary">Actualizar</button></div><div class="table-responsive"><table class="data-table"><thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Módulo</th><th>Detalle</th></tr></thead><tbody id="tablaAuditoria"></tbody></table></div></div>
+      </section>
+
+      <!-- MÓDULO 1: EXPEDIENTE DIGITAL -->
+      <section id="mod-expediente" class="module-view active">
+        <!-- Cabecera del módulo de Registro de Empleados -->
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h3>Registro de Empleados</h3>
+            
+            <!-- Botón verde de importación masiva -->
+            <button type="button" id="btnImportarEmpleadosExcel" class="btn" style="background-color: #16a34a; color: #ffffff; border: none; font-weight: 600;">
+                <i class="fa-solid fa-file-excel" style="margin-right: 8px;"></i> Cargar Empleados desde Excel (.xls)
+            </button>
+            <span id="estadoImportacionEmpleadosExcelV17"
+                  style="font-size:.85rem;color:#64748b;"></span>
+
+        </div>
+
+        <header class="module-header">
+          <h1><i class="fa-solid fa-id-card"></i> Expediente Digital de Empleados</h1>
+          <p>Administración de datos generales, salarios, contratos PDF y antigüedad.</p>
+        </header>
+
+        <div class="module-body">
+          <div class="card" style="background:#fff; padding:20px; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
+            <h3><i class="fa-solid fa-user-plus"></i> Registrar Nuevo Empleado</h3>
+            
+<div id="mensajeEmpleadoV17"
+     role="alert"
+     aria-live="polite"
+     style="display:none; margin:12px 0 0 0; padding:12px 14px; border-radius:8px; font-size:.94rem;">
+</div>
+
+            <form id="formEmpleado" style="display:grid; grid-template-columns: repeat(3, 1fr); gap:15px; margin-top:15px;">
+              <div>
+                <label>Empresa de Alta:</label>
+                <select id="expEmpresa" class="form-control" required></select>
+              </div>
+              <div>
+                <label>ID / Nº Empleado:</label>
+                <input type="text" id="expNumEmpleado" class="form-control" placeholder="Ej: EMP-001" required />
+              </div>
+              <div>
+                <label>Nombre(s):</label>
+                <input type="text" id="expNombre" class="form-control" required />
+              </div>
+              <div>
+                <label>Apellido(s):</label>
+                <input type="text" id="expApellido" class="form-control" required />
+              </div>
+              <div>
+                <label>Puesto:</label>
+                <input type="text" id="expPuesto" class="form-control" />
+              </div>
+              <div>
+                <label>Fecha de Ingreso:</label>
+                <input type="date" id="expFechaIngreso" class="form-control" required />
+</div>
+              <div>
+                <label>Fecha del Contrato:</label>
+                <input type="date" id="expFechaContrato" class="form-control" />
+              </div>
+              <div>
+                <label>Fecha de Vencimiento del Contrato:</label>
+                <input type="date" id="expFechaVencimientoContrato" class="form-control" />
+              </div>
+              <div>
+                <label>Edad:</label>
+                <input type="number" id="expEdad" class="form-control" min="0" max="120" placeholder="Ej: 32" required />
+              </div>
+              <div>
+                <label>RFC:</label>
+                <input type="text" id="expRFC" class="form-control" minlength="12" maxlength="13" pattern="[A-Za-z0-9]{12,13}" placeholder="RFC del empleado" style="text-transform:uppercase;" required />
+              </div>
+              <div>
+                <label>NSS:</label>
+                <input type="text" id="expNSS" class="form-control" minlength="11" maxlength="11" pattern="[0-9]{11}" inputmode="numeric" placeholder="NSS del empleado" required />
+              </div>
+              <div>
+                <label>Salario Diario Fiscal:</label>
+                <input type="number" step="0.01" id="expSalarioDiario" class="form-control" placeholder="0.00" required />
+              </div>
+              <div>
+                <label>Salario Base / SBC ($):</label>
+                <input type="number" step="0.01" id="expSalarioBase" class="form-control" placeholder="0.00" required />
+              </div>
+              <div>
+                <label>Contrato Digital (PDF):</label>
+                <div style="display:flex; gap:5px;">
+                  <input type="text" id="expRutaPdf" class="form-control" placeholder="Sin archivo..." readonly />
+                  <button type="button" id="btnBuscarPdf" class="btn btn-secondary"><i class="fa-solid fa-folder-open"></i></button>
+                </div>
+              </div>
+
+              <div style="grid-column: span 3; text-align:right; margin-top:10px;">
+                <button type="submit" id="btnGuardarEmpleadoV22" class="btn btn-primary"><i class="fa-solid fa-save"></i> Guardar Expediente</button>
+                <button type="button" id="btnCancelarEdicionEmpleadoV22" class="btn btn-secondary" style="display:none;"><i class="fa-solid fa-xmark"></i> Cancelar edición</button>
+                <button type="button" id="btnLimpiarExpedienteV10" class="btn btn-secondary"><i class="fa-solid fa-eraser"></i> Limpiar campos</button>
+              </div>
+            </form>
+          </div>
+
+          <!-- SEGUNDO RECUADRO: PLANTILLA DE EMPLEADOS CON BÚSQUEDA Y FILTROS -->
+          <div class="card" style="background:#fff; padding:20px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; margin-bottom: 15px;">
+              <h3 style="margin:0;"><i class="fa-solid fa-users"></i> Plantilla de Empleados</h3>
+
+              <!-- Contenedor de Búsqueda Dinámica y Filtros -->
+              <div style="display: flex; align-items: center; gap: 10px; max-width: 500px; width: 100%;">
+                
+                <!-- Barra de Búsqueda en vivo -->
+                <div style="position: relative; flex-grow: 1;">
+                  <i class="fa-solid fa-magnifying-glass" style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #94a3b8;"></i>
+                  <input type="text" id="inputBusquedaEmpleado" class="form-control" placeholder="Buscar por ID o Nombre..." style="padding-left: 32px;" />
+                </div>
+
+                <!-- Botón y Menú Flotante de Filtros -->
+                <div class="dropdown-filter-container">
+                  <button type="button" id="btnToggleFiltros" class="btn btn-secondary" style="display: flex; align-items: center; gap: 6px;">
+                    <i class="fa-solid fa-filter"></i>
+                    <span>Filtrar</span>
+                  </button>
+
+                  <!-- Menú Desplegable con los Parámetros -->
+                  <div id="menuFiltrosAvanzados" class="dropdown-filter-menu">
+                    <h4 style="margin-top:0; margin-bottom:12px; font-size:0.95rem; border-bottom:1px solid #e2e8f0; padding-bottom:8px;">
+                      <i class="fa-solid fa-sliders"></i> Filtros Avanzados
+                    </h4>
+
+                    <!-- Salario Diario -->
+                    <div class="filter-group">
+                      <label>Salario Diario Fiscal</label>
+                      <div class="filter-range">
+                        <input type="number" step="0.01" id="filtroSDMin" class="form-control" placeholder="Mín" />
+                        <span>-</span>
+                        <input type="number" step="0.01" id="filtroSDMax" class="form-control" placeholder="Máx" />
+                      </div>
+                    </div>
+
+                    <!-- Salario Base / SBC -->
+                    <div class="filter-group">
+                      <label>Salario Base / SBC ($)</label>
+                      <div class="filter-range">
+                        <input type="number" step="0.01" id="filtroSBCMin" class="form-control" placeholder="Mín" />
+                        <span>-</span>
+                        <input type="number" step="0.01" id="filtroSBCMax" class="form-control" placeholder="Máx" />
+                      </div>
+                    </div>
+
+                    <!-- Rango de Fecha de Ingreso -->
+                    <div class="filter-group">
+                      <label>Fecha de Ingreso (Rango)</label>
+                      <input type="date" id="filtroFechaInicio" class="form-control" style="margin-bottom:5px; font-size:0.85rem;" title="Desde" />
+                      <input type="date" id="filtroFechaFin" class="form-control" style="font-size:0.85rem;" title="Hasta" />
+                    </div>
+
+                    <!-- Antigüedad en Años -->
+                    <div class="filter-group">
+                      <label>Antigüedad (Años)</label>
+                      <div class="filter-range">
+                        <input type="number" min="0" id="filtroAntiguedadMin" class="form-control" placeholder="Mín" />
+                        <span>a</span>
+                        <input type="number" min="0" id="filtroAntiguedadMax" class="form-control" placeholder="Máx" />
+                      </div>
+                    </div>
+
+                    <!-- Acciones del Filtro -->
+                    <div class="filter-actions">
+                      <button type="button" id="btnLimpiarFiltros" class="btn btn-secondary" style="font-size:0.8rem; padding:5px 10px;">Limpiar</button>
+                      <button type="button" id="btnAplicarFiltros" class="btn btn-primary" style="font-size:0.8rem; padding:5px 10px;">Aplicar Filtros</button>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            <!-- Tabla de Datos -->
+            <table class="table" style="width:100%; border-collapse:collapse; margin-top:15px;">
+              <thead>
+                <tr style="background:#f1f5f9; text-align:left;">
+                  <th>ID</th>
+                  <th>Nombre Completo</th>
+                  <th>Empresa</th>
+                  <th>Salario Diario</th>
+                  <th>Salario Base</th>
+                  <th>Fecha Ingreso</th>
+                  <th>Antigüedad</th>
+                  <th>Documentación (PDF)</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody id="tablaExpedientes"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+     <!-- ========================================== -->
+<!-- MÓDULO 2: VACACIONES                       -->
+<!-- ========================================== -->
+<section id="mod-vacaciones" class="module-view">
+  <header class="module-header">
+    <h1><i class="fa-solid fa-umbrella-beach"></i> Módulo de Vacaciones</h1>
+    <p>Gestión de goce de vacaciones, saldos por antigüedad, solicitudes e historial de otorgaciones.</p>
+  </header>
+
+  <div class="module-body">
+    <!-- 1. BUSCADOR DE EMPLEADOS -->
+    <div class="card" style="background:#fff; padding:20px; border-radius:8px; margin-bottom:20px; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
+      <h3 style="margin-top:0; color:#1e293b; font-size:1.1rem;"><i class="fa-solid fa-magnifying-glass" style="color:#2563eb;"></i> Buscar Empleado por Nombre o Folio</h3>
+      <div style="display:flex; gap:15px; margin-top:10px; align-items:center; position:relative;">
+        <div class="search-container" style="flex:1; position:relative;">
+          <input type="text" id="buscarEmpVacaciones" class="form-control" placeholder="Escribe Folio (ej. EMP-0009) o Nombre del empleado..." autocomplete="off" style="width:100%;" />
+          <div id="resBusquedaVacaciones" class="search-results" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:250px; overflow-y:auto; box-shadow:0 4px 6px -1px rgba(0,0,0,0.1); border-radius:0 0 6px 6px; border:1px solid #e2e8f0; background:#fff; z-index:999999;"></div>
+        </div>
+        <button type="button" id="btnLimpiarEmpleadoVacaciones" class="btn btn-secondary" style="white-space:nowrap;">
+          <i class="fa-solid fa-eraser"></i> Limpiar
+        </button>
+        <!-- Guarda el ID de SQLite para la base de datos (ej. 9) -->
+        <input type="hidden" id="idEmpVacacionesSeleccionado" />
+      </div>
+    </div>
+
+    <!-- 2. RESUMEN DE SALDO Y ESTADO -->
+    <div id="resumenSaldoVacaciones"></div>
+
+    <!-- 3. FORMULARIO DE REGISTRO DE VACACIONES -->
+    <div class="card" style="background:#fff; padding:20px; border-radius:8px; margin-bottom:25px; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0; color:#1e293b; font-size:1.1rem;"><i class="fa-solid fa-calendar-plus" style="color:#2563eb;"></i> Registrar Solicitud de Vacaciones</h3>
+        <button type="button" id="btnExportarPdfVacaciones" class="btn btn-secondary" style="display:none;">
+          <i class="fa-solid fa-file-pdf"></i> Exportar Reporte de Saldo PDF
+        </button>
+      </div>
+
+      <form id="formSolicitudVacaciones" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:15px;">
+        <div>
+          <label style="font-weight:600; font-size:0.88rem; color:#475569;">Fecha de Inicio:</label>
+          <input type="date" id="vacFechaInicio" class="form-control" style="width:100%; margin-top:4px;" required />
+        </div>
+        <div>
+          <label style="font-weight:600; font-size:0.88rem; color:#475569;">Fecha de Fin:</label>
+          <input type="date" id="vacFechaFin" class="form-control" style="width:100%; margin-top:4px;" required />
+        </div>
+        <div>
+          <label style="font-weight:600; font-size:0.88rem; color:#475569;">Días Solicitados (Laborables):</label>
+          <input type="number" step="0.5" id="vacDiasSolicitados" class="form-control" placeholder="Ej: 5" style="width:100%; margin-top:4px;" required />
+        </div>
+        <div>
+          <label style="font-weight:600; font-size:0.88rem; color:#475569;">Observaciones / Folio:</label>
+          <input type="text" id="vacObservaciones" class="form-control" placeholder="Opcional..." style="width:100%; margin-top:4px;" />
+        </div>
+        <div style="grid-column: 1 / -1; text-align:right; margin-top:5px;">
+          <button type="submit" class="btn btn-success" style="padding:8px 20px;"><i class="fa-solid fa-check"></i> Registrar Vacaciones</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- 4. NUEVA SECCIÓN: HISTORIAL DE OTORGACIONES Y FILTROS AVANZADOS -->
+    <div class="card" style="background:#fff; padding:20px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.05); border:1px solid #e2e8f0;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0; color:#1e293b; font-size:1.1rem; display:flex; align-items:center; gap:8px;">
+          <i class="fa-solid fa-clock-rotate-left" style="color:#2563eb;"></i> 
+          Historial de Solicitudes y Otorgaciones
+        </h3>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="cargarHistorialVacaciones()">
+          <i class="fa-solid fa-rotate"></i> Actualizar Historial
+        </button>
+      </div>
+
+      <!-- BARRA DE BÚSQUEDA Y FILTROS AVANZADOS (ESTILO EXPEDIENTE DIGITAL) -->
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:10px; margin-bottom:15px; background:#f8fafc; padding:12px; border-radius:6px; border:1px solid #e2e8f0;">
+        <!-- Buscador por Texto (Folio o Nombre) -->
+        <div>
+          <label style="font-size:0.75rem; font-weight:bold; color:#64748b; display:block; margin-bottom:4px;">BUSCAR EMPLEADO</label>
+          <div class="search-container" style="position:relative; width:100%;"><input type="text" id="filtroHistorialTexto" class="form-control" placeholder="Nombre o Folio (ej. EMP-0009)..." autocomplete="off" style="width:100%; font-size:0.85rem;"><div id="resFiltroHistorialTexto" class="search-results" style="display:none;"></div></div>
+        </div>
+
+        <!-- Filtro por Estatus -->
+        <div>
+          <label style="font-size:0.75rem; font-weight:bold; color:#64748b; display:block; margin-bottom:4px;">ESTATUS</label>
+          <select id="filtroHistorialEstatus" class="form-control" style="width:100%; font-size:0.85rem;">
+            <option value="TODOS">-- Todos los Estatus --</option>
+            <option value="APROBADO">Aprobados / Otorgados</option>
+            <option value="PENDIENTE">Pendientes</option>
+            <option value="RECHAZADO">Rechazados / Cancelados</option>
+          </select>
+        </div>
+
+        <!-- Filtro Rango Fecha Inicio -->
+        <div>
+          <label style="font-size:0.75rem; font-weight:bold; color:#64748b; display:block; margin-bottom:4px;">DESDE</label>
+          <input type="date" id="filtroHistorialFechaInicio" class="form-control" style="width:100%; font-size:0.85rem;">
+        </div>
+
+        <!-- Filtro Rango Fecha Fin -->
+        <div>
+          <label style="font-size:0.75rem; font-weight:bold; color:#64748b; display:block; margin-bottom:4px;">HASTA</label>
+          <input type="date" id="filtroHistorialFechaFin" class="form-control" style="width:100%; font-size:0.85rem;">
+        </div>
+      </div>
+
+      <!-- TABLA DE OTORGACIONES REGISTRADAS -->
+      <div style="overflow-x:auto;">
+<table class="table" style="width:100%; border-collapse:collapse; font-size:0.88rem;">
+          <thead>
+            <tr style="background:#f1f5f9; text-align:left; color:#475569; border-bottom:2px solid #e2e8f0;">
+              <th style="padding:10px;">Folio</th>
+              <th style="padding:10px;">Empleado</th>
+              <th style="padding:10px;">Fechas (Inicio - Fin)</th>
+              <th style="padding:10px;">Días Solicitados</th>
+              <th style="padding:10px;">Estatus</th>
+              <th style="padding:10px;">Observaciones</th>
+              <th style="padding:10px; text-align:center;">Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="tablaHistorialVacaciones">
+            <tr>
+              <td colspan="7" style="text-align:center; padding:20px; color:#64748b;">
+                Cargando historial de vacaciones...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+      <!-- MÓDULO 3: FINIQUITOS Y LIQUIDACIONES -->
+      <section id="mod-finiquitos" class="module-view">
+  <header class="module-header">
+    <h1><i class="fa-solid fa-calculator"></i> Finiquitos y Liquidaciones</h1>
+    <p>Cálculo basado en la plantilla de Excel de finiquitos 2026. La prima vacacional se calcula al 25% sobre el remanente de vacaciones.</p>
+  </header>
+  <div class="module-body">
+    <div class="card" style="background:#fff;padding:20px;border-radius:8px;margin-bottom:20px;box-shadow:0 2px 4px rgba(0,0,0,.05);">
+      <h3><i class="fa-solid fa-user-minus"></i> Configurar cálculo</h3>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin-top:15px;">
+        <div>
+          <label>Empleado:</label>
+          <div class="search-container">
+            <input type="text" id="buscarEmpFiniquito" class="form-control" placeholder="Buscar empleado..." autocomplete="off">
+            <div id="resBusquedaFiniquito" class="search-results"></div>
+          </div>
+          <input type="hidden" id="idEmpFiniquitoSeleccionado">
+        </div>
+        <div>
+          <label>Fecha de Baja:</label>
+          <input type="date" id="finFechaBaja" class="form-control" required>
+        </div>
+        <div>
+          <label>Tipo de cálculo:</label>
+          <select id="finTipoBaja" class="form-control">
+            <option value="FINIQUITO" selected>Finiquito</option>
+            <option value="LIQUIDACION">Liquidación</option>
+          </select>
+        </div>
+        <div>
+          <label>Salario Diario Fiscal ($):</label>
+          <input type="number" id="finSalarioFiscal" class="form-control" min="0" step="0.01" placeholder="Se toma del empleado">
+        </div>
+        <div>
+          <label>Salario Diario Real ($):</label>
+          <input type="number" id="finSalarioReal" class="form-control" min="0" step="0.01" placeholder="Opcional; por defecto fiscal">
+        </div>
+        <div>
+          <label>ISR retenido ($):</label>
+          <input type="number" id="finISR" class="form-control" min="0" step="0.01" value="0">
+        </div>
+        <div>
+          <label>¿Considerar indemnización de 90 días? (solo Liquidación)</label>
+          <select id="finIncluirIndemnizacion90" class="form-control">
+            <option value="1" selected>Sí, incluir 90 días</option>
+            <option value="0">No, no incluir</option>
+          </select>
+        </div>
+        <div>
+          <label>Prima de antigüedad (%):</label>
+          <input type="number" id="finPorcentajePrimaAntiguedad" class="form-control"
+                 min="40" max="100" step="1" value="100"
+                 inputmode="numeric" placeholder="40 a 100">
+        </div>
+        <div>
+          <label>Días de sueldo pendientes:</label>
+          <input type="number" id="finDiasPendientes" class="form-control" min="0" step="0.01" value="0">
+        </div>
+        <div>
+          <label>Observaciones:</label>
+          <input type="text" id="finObservaciones" class="form-control" placeholder="Notas del cálculo">
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:15px;flex-wrap:wrap;">
+        <label for="ejercicioTablaISRV26" style="align-self:center;font-size:.85rem;color:#475569;">Ejercicio:</label>
+        <input type="number" id="ejercicioTablaISRV26" class="form-control" style="max-width:100px;" min="2020" max="2100" step="1">
+        <button id="btnImportarTablaISRV26" type="button" class="btn btn-secondary"><i class="fa-solid fa-file-excel"></i> Importar Tabla ISR</button>
+        <span id="estadoTablaISRV26" style="align-self:center;font-size:.9rem;color:#64748b;">Tabla ISR: usando tabla integrada si no se importa una para el año de la baja.</span>
+        <button id="btnLimpiarFiniquitoV23" type="button" class="btn btn-secondary"><i class="fa-solid fa-eraser"></i> Limpiar</button>
+        <button id="btnSimularFiniquito" type="button" class="btn btn-primary"><i class="fa-solid fa-calculator"></i> Calcular</button>
+      </div>
+      <div id="mensajeFiniquitoV23" style="display:none;margin-top:15px;padding:12px;border-radius:6px;"></div>
+    </div>
+
+    <div id="boxResultadoSimulacion" class="card" style="display:none;background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.05);">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+        <h3><i class="fa-solid fa-file-invoice-dollar"></i> Desglose del cálculo</h3>
+        <div style="display:flex;gap:8px;">
+          <button id="btnExportarPdfFiniquito" type="button" class="btn btn-secondary"><i class="fa-solid fa-file-pdf"></i> Exportar PDF</button>
+          <button id="btnGuardarFiniquito" type="button" class="btn btn-danger"><i class="fa-solid fa-user-xmark"></i> Aplicar Baja y Guardar</button>
+        </div>
+      </div>
+      <div id="resumenCalculoFiniquitoV23" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:15px 0;"></div>
+      <table class="table" style="width:100%;border-collapse:collapse;margin:15px 0;">
+        <thead><tr style="background:#f8fafc;text-align:left;"><th>Concepto</th><th style="text-align:right;">Días / Base</th><th style="text-align:right;">Monto Fiscal</th><th style="text-align:right;">Monto Real</th></tr></thead>
+        <tbody id="detalleFiniquitoV23"></tbody>
+      </table>
+      <div id="totalesFiniquitoV23" style="display:grid;grid-template-columns:repeat(2,1fr);gap:15px;"></div>
+    </div>
+
+    <div class="card" style="margin-top:20px;background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.05);">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div>
+          <h3 style="margin:0;"><i class="fa-solid fa-clock-rotate-left"></i> Historial de Finiquitos y Liquidaciones</h3>
+          <p style="margin:5px 0 0;color:#64748b;">Consulta cálculos guardados y filtra por empleado, tipo y fecha.</p>
+        </div>
+        <button type="button" id="btnActualizarHistorialFiniquitos" class="btn btn-secondary"><i class="fa-solid fa-rotate"></i> Actualizar</button>
+      </div>
+      <div style="display:grid;grid-template-columns:minmax(260px,1fr) 180px 160px 160px;gap:10px;margin-top:15px;align-items:start;">
+        <div class="search-container">
+          <input id="buscarHistorialFiniquitos" class="form-control" placeholder="Buscar empleado, ID, empresa o tipo..." autocomplete="off">
+          <div id="resBusquedaHistorialFiniquitos" class="search-results" style="display:none;"></div>
+        </div>
+        <select id="filtroTipoHistorialFiniquitos" class="form-control"><option value="">Todos los tipos</option><option value="FINIQUITO">Finiquito</option><option value="LIQUIDACION">Liquidación</option></select>
+        <input type="date" id="filtroDesdeHistorialFiniquitos" class="form-control" title="Desde">
+        <input type="date" id="filtroHastaHistorialFiniquitos" class="form-control" title="Hasta">
+      </div>
+      <div class="table-responsive" style="margin-top:15px;">
+        <table class="data-table">
+          <thead><tr><th>Folio / ID</th><th>Empleado</th><th>Empresa</th><th>Tipo</th><th>Fecha baja</th><th>Remanente</th><th>ISR</th><th>Total neto fiscal</th></tr></thead>
+          <tbody id="tablaHistorialFiniquitos"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MÓDULO NUEVO: INTEGRACIÓN DE SALARIOS -->
+<section id="mod-salarios" class="module-view">
+  <header class="module-header"><h1><i class="fa-solid fa-sack-dollar"></i> Integración de Salarios</h1><p>Aplica incrementos porcentuales al salario diario fiscal. El nuevo valor se usa de inmediato en finiquitos, liquidaciones y aguinaldos.</p></header>
+  <div class="module-body">
+
+    <div class="card" style="padding:18px;margin-bottom:20px;">
+      <h3 style="margin-top:0;"><i class="fa-solid fa-percent"></i> Aplicar incremento porcentual</h3>
+      <div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-top:12px;">
+        <div>
+          <label>Porcentaje de incremento (%)</label>
+          <input type="number" id="salPorcentajeIncremento" class="form-control" placeholder="Ej. 5 (o -3 para decremento)" step="0.01" style="max-width:220px;">
+        </div>
+        <button type="button" id="btnSalCompararIncremento" class="btn btn-primary"><i class="fa-solid fa-magnifying-glass-chart"></i> Comparar impacto de selección</button>
+        <span id="salMensajeAviso" style="font-size:.88rem;color:#64748b;"></span>
+      </div>
+    </div>
+
+    <!-- Panel comparativo: se muestra tras "Comparar impacto de selección" -->
+    <div class="card" id="salPanelComparativo" style="padding:18px;margin-bottom:20px;display:none;border:1px solid #99f6e4;background:#f0fdfa;">
+      <h3 style="margin-top:0;"><i class="fa-solid fa-scale-balanced"></i> Comparativa del incremento</h3>
+      <div class="table-responsive">
+        <table class="table" style="width:100%;border-collapse:collapse;">
+          <thead><tr style="background:#f1f5f9;text-align:left;">
+            <th>Empleado</th><th>Empresa</th><th>Salario diario actual</th><th>Salario diario nuevo</th><th>Diferencia diaria</th><th>Salario mensual actual</th><th>Salario mensual nuevo</th>
+          </tr></thead>
+          <tbody id="salTablaComparativa"></tbody>
+        </table>
+      </div>
+      <div style="display:flex;gap:12px;margin-top:16px;">
+        <button type="button" id="btnSalConfirmarIncremento" class="btn" style="background:#16a34a;color:#fff;"><i class="fa-solid fa-check"></i> Confirmar y aplicar cambios</button>
+        <button type="button" id="btnSalCancelarIncremento" class="btn btn-secondary"><i class="fa-solid fa-xmark"></i> Cancelar</button>
+      </div>
+    </div>
+
+    <div class="card" style="padding:20px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-table-list"></i> Plantilla de empleados</h3>
+        <input type="text" id="salBuscarEmpleado" class="form-control" placeholder="Buscar por nombre..." style="max-width:260px;">
+      </div>
+      <table class="table" style="width:100%;border-collapse:collapse;margin-top:15px;">
+        <thead>
+          <tr style="background:#f1f5f9;text-align:left;">
+            <th style="width:36px;"><input type="checkbox" id="salSeleccionarTodos"></th>
+            <th>ID</th>
+            <th>Nombre completo</th>
+            <th>Empresa</th>
+            <th>Salario diario fiscal</th>
+            <th>Fecha de ingreso</th>
+            <th>Antigüedad</th>
+            <th>Salario (× 30)</th>
+          </tr>
+        </thead>
+        <tbody id="tablaSalarios"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- MÓDULO NUEVO: AGUINALDOS -->
+<section id="mod-aguinaldos" class="module-view">
+  <header class="module-header"><h1><i class="fa-solid fa-gift"></i> Aguinaldos</h1><p>Calcula el aguinaldo proporcional o completo de cada empleado según sus días laborados en el ejercicio.</p></header>
+  <div class="module-body">
+
+    <div class="card" style="padding:20px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-table-list"></i> Plantilla de aguinaldos</h3>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+          <input type="text" id="aguBuscarEmpleado" class="form-control" placeholder="Buscar por nombre..." style="max-width:220px;">
+          <button type="button" id="btnAguDiasTodos" class="btn btn-secondary" title="Aplica el mismo número de días laborados a toda la plantilla">
+            <i class="fa-solid fa-arrows-to-eye"></i> Aplicar días a todos
+          </button>
+          <input type="number" id="aguDiasParaTodos" class="form-control" min="0" max="365" placeholder="Días" style="max-width:100px;">
+          <button type="button" id="btnAguExportar" class="btn" style="background:#16a34a;color:#fff;">
+            <i class="fa-solid fa-file-excel"></i> Exportar plantilla completa
+          </button>
+        </div>
+      </div>
+      <p style="color:#64748b;font-size:.85rem;margin:10px 0 0;">Fórmula: Aguinaldo = Salario diario fiscal × (Días laborados ÷ 365) × 15 días.</p>
+      <table class="table" style="width:100%;border-collapse:collapse;margin-top:15px;">
+        <thead>
+          <tr style="background:#f1f5f9;text-align:left;">
+            <th>ID</th>
+            <th>Nombre completo</th>
+            <th>Empresa</th>
+            <th>Salario diario fiscal</th>
+            <th>Fecha de ingreso</th>
+            <th>Antigüedad</th>
+            <th style="width:130px;">Días laborados</th>
+            <th>Aguinaldo a percibir</th>
+          </tr>
+        </thead>
+        <tbody id="tablaAguinaldos"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- MÓDULO 4: INCIDENCIAS Y ASISTENCIA -->
+      <section id="mod-incidencias" class="module-view">
+        <header class="module-header"><h1><i class="fa-solid fa-calendar-check"></i> Incidencias</h1><p>Incidencias a cuenta de vacaciones: cada día registrado se descuenta automáticamente del saldo disponible.</p></header>
+        <div class="module-body">
+          <div class="card" style="background:#fff;padding:20px;border-radius:8px;margin-bottom:20px;box-shadow:0 2px 4px rgba(0,0,0,.05);">
+            <h3><i class="fa-solid fa-pen-to-square"></i> Registrar Incidencia</h3>
+<div id="incSaldoEmpleado" class="profile-summary" style="margin:14px 0;"></div>
+            <form id="formIncidenciaManual" style="display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin-top:15px;">
+              <div><label>Empleado:</label><div class="search-container"><input type="text" id="buscarEmpIncidencia" class="form-control" placeholder="Buscar empleado..." autocomplete="off" required><div id="resBusquedaIncidencia" class="search-results"></div></div><input type="hidden" id="idEmpIncidenciaSeleccionado"></div>
+              <div><label>Fecha de incidencia:</label><input type="date" id="incFecha" class="form-control" required></div><div><label>Fecha final:</label><input type="date" id="fechaIncidenciaFinV10" class="form-control" required><small id="diasRangoIncidenciaV10" style="display:block;margin-top:5px;color:#64748b;">Rango: 1 día</small></div>
+              <div><label>Días a descontar:</label><input type="number" id="incDias" class="form-control" min="1" step="1" value="1" required></div>
+              <div style="grid-column:span 2;"><label>Motivo / Observaciones:</label><input type="text" id="incObservaciones" class="form-control" placeholder="Motivo de la incidencia..."></div>
+              <div style="display:flex;align-items:flex-end;"><button type="submit" class="btn btn-primary" style="width:100%;"><i class="fa-solid fa-minus-circle"></i> Registrar Incidencia</button>
+<button type="button" id="btnLimpiarIncidenciaV12" class="btn btn-secondary">🧹 Limpiar</button></div>
+            </form>
+          </div>
+          <div class="card" style="background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.05);">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;"><h3 style="margin:0;"><i class="fa-solid fa-clock-rotate-left"></i> Historial de Incidencias</h3>
+<div id="busquedaHistorialIncidenciasV16" class="search-container"
+     style="position:relative;max-width:460px;margin:14px 0 8px 0;">
+    <input type="text"
+           id="buscarHistorialIncidenciasV16"
+           class="form-control"
+           placeholder="Buscar empleado en el historial..."
+           autocomplete="off"
+           aria-label="Buscar empleado en el historial de incidencias">
+    <div id="resBusquedaHistorialIncidenciasV16"
+         class="search-results"
+         style="display:none;"></div>
+</div>
+<button type="button" id="btnActualizarHistorialIncidencias" class="btn btn-secondary"><i class="fa-solid fa-rotate"></i> Actualizar</button></div>
+            <div class="table-responsive" style="margin-top:15px;">
+<table class="data-table"><thead><tr><th>Folio</th><th>ID</th><th>Empleado</th><th>Fecha</th><th>Empresa</th><th>Días</th><th>Estado</th><th>Acción</th></tr></thead><tbody id="tablaHistorialIncidencias"></tbody></table></div>
+          </div>
+        </div>
+      </section>
+
+
+      <!-- MÓDULO CONTRATOS -->
+      <section id="mod-contratos" class="module-view">
+        <header class="module-header">
+          <h1><i class="fa-solid fa-file-contract"></i> Contratos</h1>
+          <p>Control de contratos activos, próximos a vencer y personal sin contrato registrado.</p>
+        </header>
+        <div class="module-body">
+          <div class="stats-grid" id="contratosResumenCards">
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-file-circle-check"></i></div><div><span>Contratos activos</span><strong id="contratosActivos">0</strong></div></div>
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-file-circle-exclamation"></i></div><div><span>Por vencer (60 días)</span><strong id="contratosPorVencer">0</strong></div></div>
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-file-circle-xmark"></i></div><div><span>Vencidos</span><strong id="contratosVencidos">0</strong></div></div>
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-user-slash"></i></div><div><span>Sin contrato registrado</span><strong id="contratosSinContrato">0</strong></div></div>
+          </div>
+
+          <div class="card" style="margin-top:20px;">
+            <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+              <h3><i class="fa-solid fa-list-check"></i> Resumen contractual</h3>
+              <button type="button" id="btnActualizarContratos" class="btn btn-primary">
+                <i class="fa-solid fa-rotate"></i> Actualizar
+              </button>
+            </div>
+            <div class="table-responsive" style="margin-top:15px;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Empleado</th>
+                    <th>Empresa</th>
+                    <th>Puesto</th>
+                    <th>Fecha contrato</th>
+                    <th>Vencimiento</th>
+                    <th>Estado</th>
+                    <th>Días</th>
+                    <th>PDF</th>
+                  </tr>
+                </thead>
+                <tbody id="tablaContratos"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+     <!-- MÓDULO 5: REPORTES & EXPORTACIÓN -->
+<section id="mod-reportes" class="module-view">
+  <header class="module-header">
+    <h1><i class="fa-solid fa-chart-line"></i> Reportes & Exportación</h1>
+    <p>Generación de reportes globales en PDF y Excel.</p>
+  </header>
+  
+  <div class="module-body" style="display: flex; gap: 20px; align-items: flex-start; padding-top: 15px;">
+    
+   <!-- Primer Panel (Izquierdo): Menú de Tipos de Reportes -->
+<div style="width: 260px; min-width: 260px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+  <h3 style="font-size: 0.95rem; margin-top: 0; color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">
+    <i class="fa-solid fa-list-check"></i> Menú de Reportes
+  </h3>
+  <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 12px;">
+    <button type="button" id="btnReporteExpedientes" class="btn btn-secondary" onclick="window.mostrarOpcionesReporte('expedientes')" style="text-align: left; display: flex; align-items: center; gap: 8px;">
+      <i class="fa-solid fa-users"></i> Expedientes y Empleados
+    </button>
+    <button type="button" id="btnReporteSalarios" class="btn btn-secondary" onclick="window.mostrarOpcionesReporte('salarios')" style="text-align: left; display: flex; align-items: center; gap: 8px;">
+      <i class="fa-solid fa-wallet"></i> Salarios y SBC
+    </button>
+    <button type="button" id="btnReporteAntiguedad" class="btn btn-secondary" onclick="window.mostrarOpcionesReporte('antiguedad')" style="text-align: left; display: flex; align-items: center; gap: 8px;">
+      <i class="fa-solid fa-calendar-days"></i> Antigüedad y Fechas
+    </button>
+  </div>
+</div>
+
+    <!-- SEGUNDO PANEL (BLANCO DE DERECHA): Muestra el contenido según la opción seleccionada -->
+    <div id="panelContenidoReportes" style="flex-grow: 1; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 24px; min-height: 400px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+      <!-- Estado inicial antes de que el usuario seleccione una opción -->
+      <div style="text-align: center; color: #64748b; margin-top: 60px;">
+        <i class="fa-solid fa-file-invoice" style="font-size: 3rem; color: #cbd5e1; margin-bottom: 12px;"></i>
+        <h3 style="margin: 0 0 6px 0; color: #334155; font-size: 1.1rem;">Selecciona un Reporte</h3>
+        <p style="margin: 0; font-size: 0.9rem;">Elige una opción del menú de la izquierda para ver las opciones de exportación.</p>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section id="mod-contpaqi" class="module-view">
+  <header class="module-header">
+    <h1><i class="fa-solid fa-file-export"></i> Complemento CONTPAQi</h1>
+    <p>Exporta Excels listos para mapear en el asistente de importación de CONTPAQi Nóminas, e importa el catálogo de empleados exportado desde CONTPAQi.</p>
+  </header>
+
+  <div class="module-body" style="display: flex; flex-direction: column; gap: 20px; padding-top: 15px;">
+
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 16px;color:#1e3a8a;font-size:.9rem;">
+      <i class="fa-solid fa-circle-info"></i> CONTPAQi no usa un formato de columnas fijo para importar Excel: la primera vez que uses cada archivo, mapea sus columnas en el asistente de importación de CONTPAQi Nóminas. Las columnas de estos archivos ya están en español y con un concepto por columna para facilitar ese mapeo.
+    </div>
+
+    <div style="background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+      <h3 style="margin-top:0;font-size:.95rem;color:#1e293b;border-bottom:1px solid #e2e8f0;padding-bottom:8px;">
+        <i class="fa-solid fa-file-arrow-down"></i> Exportar hacia CONTPAQi
+      </h3>
+
+      <div style="display:flex;flex-direction:column;gap:10px;max-width:520px;margin-top:14px;">
+        <button type="button" id="btnContpaqiExportarEmpleados" class="btn btn-secondary" style="text-align:left;display:flex;align-items:center;gap:8px;">
+          <i class="fa-solid fa-users"></i> Exportar catálogo de empleados
+        </button>
+
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <label for="contpaqiFechaInicioMov" style="font-size:.85rem;color:#475569;">Del:</label>
+          <input type="date" id="contpaqiFechaInicioMov" class="form-control" style="max-width:170px;">
+          <label for="contpaqiFechaFinMov" style="font-size:.85rem;color:#475569;">al:</label>
+          <input type="date" id="contpaqiFechaFinMov" class="form-control" style="max-width:170px;">
+        </div>
+        <button type="button" id="btnContpaqiExportarMovimientos" class="btn btn-secondary" style="text-align:left;display:flex;align-items:center;gap:8px;">
+          <i class="fa-solid fa-calendar-check"></i> Exportar movimientos e incidencias del periodo
+        </button>
+
+        <button type="button" id="btnContpaqiExportarFiniquitos" class="btn btn-secondary" style="text-align:left;display:flex;align-items:center;gap:8px;">
+          <i class="fa-solid fa-calculator"></i> Exportar finiquitos y liquidaciones
+        </button>
+
+        <button type="button" id="btnContpaqiExportarImss" class="btn btn-secondary" style="text-align:left;display:flex;align-items:center;gap:8px;">
+          <i class="fa-solid fa-file-shield"></i> Exportar altas y bajas (movimientos IMSS) del periodo
+        </button>
+      </div>
+      <span id="estadoContpaqiExportar" style="display:block;margin-top:10px;font-size:.85rem;color:#64748b;"></span>
+    </div>
+
+    <div style="background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+      <h3 style="margin-top:0;font-size:.95rem;color:#1e293b;border-bottom:1px solid #e2e8f0;padding-bottom:8px;">
+        <i class="fa-solid fa-file-arrow-up"></i> Importar desde CONTPAQi
+      </h3>
+      <p style="font-size:.85rem;color:#64748b;margin-top:10px;">Selecciona un Excel de catálogo de empleados exportado desde CONTPAQi. Antes de aplicar los cambios podrás revisar cuántos empleados se darán de alta, cuántos se actualizarán y cuáles filas tienen algún aviso.</p>
+      <button type="button" id="btnContpaqiImportarEmpleados" class="btn" style="background-color:#16a34a;color:#ffffff;border:none;font-weight:600;">
+        <i class="fa-solid fa-file-excel" style="margin-right:8px;"></i> Seleccionar archivo e importar
+      </button>
+      <span id="estadoContpaqiImportar" style="display:block;margin-top:10px;font-size:.85rem;color:#64748b;"></span>
+
+      <div id="contpaqiPreviewImportacion" style="display:none;margin-top:16px;border-top:1px solid #e2e8f0;padding-top:16px;">
+        <div id="contpaqiPreviewResumen" style="font-size:.9rem;color:#1e293b;margin-bottom:10px;"></div>
+        <div style="max-height:280px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;">
+          <table style="width:100%;border-collapse:collapse;font-size:.82rem;">
+            <thead style="position:sticky;top:0;background:#f1f5f9;">
+              <tr>
+                <th style="padding:6px 8px;text-align:left;">Acción</th>
+                <th style="padding:6px 8px;text-align:left;">Código</th>
+                <th style="padding:6px 8px;text-align:left;">Nombre</th>
+                <th style="padding:6px 8px;text-align:left;">RFC</th>
+                <th style="padding:6px 8px;text-align:left;">Aviso</th>
+              </tr>
+            </thead>
+            <tbody id="contpaqiPreviewTbody"></tbody>
+          </table>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:14px;">
+          <button type="button" id="btnContpaqiConfirmarImportacion" class="btn" style="background-color:#16a34a;color:#ffffff;border:none;font-weight:600;">
+            <i class="fa-solid fa-check"></i> Confirmar importación
+          </button>
+          <button type="button" id="btnContpaqiCancelarImportacion" class="btn btn-secondary">Cancelar</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+      <h3 style="margin-top:0;font-size:.95rem;color:#1e293b;border-bottom:1px solid #e2e8f0;padding-bottom:8px;">
+        <i class="fa-solid fa-clock-rotate-left"></i> Historial de exportaciones e importaciones
+      </h3>
+      <div style="max-height:260px;overflow:auto;margin-top:10px;">
+        <table style="width:100%;border-collapse:collapse;font-size:.82rem;">
+          <thead style="position:sticky;top:0;background:#f1f5f9;">
+            <tr>
+              <th style="padding:6px 8px;text-align:left;">Fecha</th>
+              <th style="padding:6px 8px;text-align:left;">Acción</th>
+              <th style="padding:6px 8px;text-align:left;">Detalle</th>
+            </tr>
+          </thead>
+          <tbody id="contpaqiHistorialTbody"><tr><td colspan="3" style="padding:10px;color:#94a3b8;">Sin actividad todavía.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+    </main>
+  </div>
+
+  <!-- Sistema de alertas in-app (reemplazo de alert/confirm nativos) -->
+  <div id="appAlertOverlay" class="app-alert-overlay hidden">
+    <div class="app-alert-box">
+      <h3 id="appAlertTitle"></h3>
+      <p id="appAlertMessage"></p>
+      <div class="app-alert-actions">
+        <button type="button" id="appAlertCancel" class="hidden">Cancelar</button>
+        <button type="button" id="appAlertConfirm">Aceptar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Librería para generar archivos Excel reales (.xlsx) -->
+  <script src="vendor/xlsx.full.min.js"></script>
+  <!-- Script principal de interacción y control -->
+  <script src="renderer.js"></script>
+</body>
+</html>

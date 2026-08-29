@@ -1,0 +1,34 @@
+name: Release
+
+# Se dispara al publicar un tag de versión (ej. v1.2.0). electron-builder construye
+# el instalador de Windows y lo publica como asset del GitHub Release de ese tag,
+# junto con el archivo latest.yml que electron-updater usa para detectar versiones.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Compilar y publicar release
+        run: npm run release
+        env:
+          # Token automático de GitHub Actions: se usa solo aquí, en el runner de CI,
+          # para SUBIR los artefactos al release de este mismo repositorio.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,24 @@
+# Dependencias
+node_modules/
+
+# Salida de electron-builder
+dist/
+build/
+
+# Base de datos y datos sensibles locales (viven en userData del usuario, no en el repo)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Archivos de Excel de trabajo (contienen datos reales de nómina)
+*.xlsx
+*.xls
+
+# Logs
+npm-debug.log*
+*.log
+
+# Sistema
+.DS_Store
+Thumbs.db
