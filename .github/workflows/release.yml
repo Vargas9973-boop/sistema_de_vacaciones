@@ -23,6 +23,14 @@ jobs:
         with:
           node-version: 20
 
+      # Algunas dependencias transitivas (ej. @electron/node-gyp, usada por
+      # @electron/rebuild) quedan resueltas en package-lock.json con protocolo
+      # git+ssh://, que requiere una llave SSH inexistente en el runner. Se
+      # reescribe a HTTPS (acceso anónimo, funciona para repos públicos) antes
+      # de instalar.
+      - name: Forzar git sobre HTTPS para dependencias
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
       - name: Instalar dependencias
         run: npm ci
 
