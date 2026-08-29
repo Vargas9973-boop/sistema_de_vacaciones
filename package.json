@@ -57,7 +57,8 @@
     "publish": {
       "provider": "github",
       "owner": "Vargas9973-boop",
-      "repo": "sistema_de_vacaciones"
+      "repo": "sistema_de_vacaciones",
+      "releaseType": "release"
     }
   }
 }
