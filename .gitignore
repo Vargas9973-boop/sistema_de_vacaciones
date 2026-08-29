@@ -22,3 +22,6 @@ npm-debug.log*
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Estado local de herramientas de asistencia (Claude Code)
+.claude/
