@@ -142,6 +142,10 @@ function resolverFechaConFormato(valor, formatoFecha) {
     return parseExcelFecha(valor);
 }
 
+function escaparHtmlPdf(valor) {
+    return String(valor ?? '').replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
+}
+
 function obtenerFechaLocal() {
     const d = new Date();
     const year = d.getFullYear();
@@ -166,6 +170,37 @@ function calcularDiasVacacionesLFT(anios) {
     if (anios >= 21 && anios <= 25) return 28;
     if (anios >= 26 && anios <= 30) return 30;
     return 32;
+}
+
+// V34 - Factor de integración del salario (mismo criterio que usa CONTPAQi y el
+// Excel "INTEGRADOS DEFINITIVOS": FI = (365 + días de aguinaldo + (días de
+// vacaciones × % de prima vacacional)) / 365. Los días de vacaciones se toman
+// de la MISMA tabla LFT (calcularDiasVacacionesLFT) que ya usa el módulo de
+// Vacaciones, así que el factor de integración es consistente con el resto
+// del sistema. Aguinaldo (15 días) y prima vacacional (25%) son las mismas
+// constantes que ya usan los módulos de Aguinaldos y Finiquitos.
+const SDI_DIAS_AGUINALDO = 15;
+const SDI_PRIMA_VACACIONAL_PCT = 25;
+
+// V35 - Años de antigüedad para la tabla de vacaciones/factor de integración:
+// mismo criterio que Finiquitos (aniosCalculo = años cumplidos + 1, ver
+// aniosCumplidosFiniquitoV23 / calcularFiniquitoV23) y que el Excel
+// "INTEGRADOS DEFINITIVOS" (columna AÑOS ANTIGÜEDAD = años cumplidos a la
+// fecha de corte + 1). Así el empleado ya cuenta, para efectos de vacaciones
+// e integración, el año de servicio que está cursando.
+function calcularFactorIntegracionSDI(fechaIngreso, fechaReferencia) {
+    const ing = normalizarFecha(fechaIngreso);
+    const ref = normalizarFecha(fechaReferencia) || normalizarFecha(obtenerFechaLocal());
+    if (!ing || !ref || ref < ing) return { aniosCumplidos: 0, aniosAntiguedad: 1, diasVacaciones: 12, primaVacacionalDias: 3, factor: 1 };
+    let aniosCumplidos = ref.getFullYear() - ing.getFullYear();
+    if (ref.getMonth() < ing.getMonth() ||
+        (ref.getMonth() === ing.getMonth() && ref.getDate() < ing.getDate())) aniosCumplidos--;
+    aniosCumplidos = Math.max(0, aniosCumplidos);
+    const aniosAntiguedad = aniosCumplidos + 1;
+    const diasVacaciones = calcularDiasVacacionesLFT(aniosAntiguedad);
+    const primaVacacionalDias = diasVacaciones * (SDI_PRIMA_VACACIONAL_PCT / 100);
+    const factor = (365 + SDI_DIAS_AGUINALDO + primaVacacionalDias) / 365;
+    return { aniosCumplidos, aniosAntiguedad, diasVacaciones, primaVacacionalDias, factor };
 }
 
 // ==========================================
@@ -520,6 +555,11 @@ async function crearTablas() {
     }
     if (!nombresEmpleadosContrato.has('fecha_vencimiento_contrato')) {
         await dbRun(`ALTER TABLE empleados ADD COLUMN fecha_vencimiento_contrato TEXT`);
+    }
+    // V35: salario mínimo profesional (CONASAMI) aplicable al puesto del empleado,
+    // capturado manualmente — se muestra como referencia en Integración de Salarios.
+    if (!nombresEmpleadosContrato.has('salario_minimo_profesional')) {
+        await dbRun(`ALTER TABLE empleados ADD COLUMN salario_minimo_profesional REAL`);
     }
 
     await dbRun(`
@@ -1144,7 +1184,107 @@ function registrarHandlersIPC() {
             return { ok: false, error: error.message };
         }
     });
-    ipcMain.handle('auditoria:listar',async()=>{try{return {ok:true,data:await dbAll(`SELECT * FROM auditoria ORDER BY id DESC LIMIT 200`)};}catch(error){return {ok:false,error:error.message};}});
+    // V35 - admite filtro opcional por rango de fechas (día/semana/mes/personalizado
+    // desde el panel de Administración). Sin rango se conserva el comportamiento previo
+    // (últimos 200 movimientos) para no afectar a otras pantallas que ya usan este canal
+    // (p.ej. el historial de CONTPAQi).
+    ipcMain.handle('auditoria:listar', async (event, payload = {}) => {
+        try {
+            const fechaInicio = String((payload && payload.fechaInicio) || '').trim();
+            const fechaFin = String((payload && payload.fechaFin) || '').trim();
+            const where = [];
+            const params = [];
+            if (fechaInicio) { where.push('date(fecha) >= date(?)'); params.push(fechaInicio); }
+            if (fechaFin) { where.push('date(fecha) <= date(?)'); params.push(fechaFin); }
+            const limite = (fechaInicio || fechaFin) ? 5000 : 200;
+            const data = await dbAll(`SELECT * FROM auditoria ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ${limite}`, params);
+            return { ok: true, data };
+        } catch (error) {
+            return { ok: false, error: error.message };
+        }
+    });
+
+    // V35 - Exporta la bitácora de auditoría a un PDF con membrete (logotipo del
+    // sistema, igual criterio que reportes:guardar-pdf) para un rango de fechas dado
+    // (día/semana/mes o personalizado, según lo arme el panel de Administración).
+    ipcMain.handle('auditoria:exportar-pdf', async (event, payload = {}) => {
+        let win = null;
+        try {
+            const fechaInicio = String((payload && payload.fechaInicio) || '').trim();
+            const fechaFin = String((payload && payload.fechaFin) || '').trim();
+            const etiquetaRango = String((payload && payload.etiquetaRango) || '').trim() || 'Personalizado';
+            if (!fechaInicio || !fechaFin) {
+                return { ok: false, error: 'Indica un rango de fechas (desde y hasta) antes de exportar.' };
+            }
+
+            const movimientos = await dbAll(
+                `SELECT * FROM auditoria WHERE date(fecha) BETWEEN date(?) AND date(?) ORDER BY fecha ASC, id ASC`,
+                [fechaInicio, fechaFin]
+            );
+
+            const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+                title: 'Guardar bitácora de auditoría en PDF',
+                defaultPath: `Bitacora_Auditoria_${fechaInicio}_a_${fechaFin}.pdf`,
+                filters: [{ name: 'PDF', extensions: ['pdf'] }]
+            });
+            if (canceled || !filePath) return { ok: false, cancelado: true };
+
+            const logoDataUrl = obtenerLogoDataUrlPorEmpresaId(null);
+            const generadoEl = new Date().toLocaleString('es-MX', { dateStyle: 'long', timeStyle: 'short' });
+            const filasHtml = movimientos.map((m, i) => `
+                <tr style="background:${i % 2 === 0 ? '#ffffff' : '#f8fafc'};">
+                    <td>${escaparHtmlPdf(m.fecha || '')}</td>
+                    <td>${escaparHtmlPdf(m.usuario || '')}</td>
+                    <td>${escaparHtmlPdf(m.accion || '')}</td>
+                    <td>${escaparHtmlPdf(m.modulo || '')}</td>
+                    <td>${escaparHtmlPdf(m.detalle || '')}</td>
+                </tr>
+            `).join('') || `<tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:18px;">Sin movimientos registrados en el rango seleccionado.</td></tr>`;
+
+            const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+                body{font-family:'Segoe UI',Arial,sans-serif;color:#1e293b;padding:32px;}
+                .encabezado{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #0f766e;padding-bottom:14px;margin-bottom:18px;}
+                .encabezado img{width:58px;height:58px;object-fit:contain;}
+                .encabezado h1{font-size:20px;margin:0;color:#0f172a;}
+                .encabezado p{margin:2px 0 0;font-size:12px;color:#64748b;}
+                .meta{display:flex;justify-content:space-between;font-size:12px;color:#475569;margin-bottom:16px;flex-wrap:wrap;gap:6px;}
+                .meta strong{color:#0f172a;}
+                table{width:100%;border-collapse:collapse;font-size:11px;}
+                th,td{border:1px solid #cbd5e1;padding:6px 8px;text-align:left;vertical-align:top;}
+                th{background:#0f766e;color:#ffffff;font-weight:600;}
+                tfoot td{border:none;padding-top:14px;font-size:10px;color:#94a3b8;text-align:center;}
+            </style></head><body>
+                <div class="encabezado">
+                    <div>
+                        <h1>Bitácora de Auditoría</h1>
+                        <p>Sistema de Vacaciones · RRHH Control</p>
+                    </div>
+                    ${logoDataUrl ? `<img src="${logoDataUrl}" alt="Logotipo">` : ''}
+                </div>
+                <div class="meta">
+                    <span>Rango: <strong>${escaparHtmlPdf(etiquetaRango)}</strong> (${escaparHtmlPdf(fechaInicio)} a ${escaparHtmlPdf(fechaFin)})</span>
+                    <span>Movimientos: <strong>${movimientos.length}</strong></span>
+                    <span>Generado el ${escaparHtmlPdf(generadoEl)}</span>
+                </div>
+                <table>
+                    <thead><tr><th style="width:15%;">Fecha</th><th style="width:10%;">Usuario</th><th style="width:18%;">Acción</th><th style="width:15%;">Módulo</th><th>Detalle</th></tr></thead>
+                    <tbody>${filasHtml}</tbody>
+                    <tfoot><tr><td colspan="5">Documento generado automáticamente por el Sistema de Vacaciones — uso interno.</td></tr></tfoot>
+                </table>
+            </body></html>`;
+
+            win = new BrowserWindow({ show: false, webPreferences: { offscreen: true } });
+            await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+            const pdf = await win.webContents.printToPDF({ printBackground: true, landscape: true });
+            fs.writeFileSync(filePath, pdf);
+            await registrarAuditoria('Exportación de bitácora', 'Auditoría', `${etiquetaRango} · ${fechaInicio} a ${fechaFin} · ${movimientos.length} movimiento(s) · ${filePath}`);
+            return { ok: true, filePath };
+        } catch (error) {
+            return { ok: false, error: error.message };
+        } finally {
+            if (win && !win.isDestroyed()) win.close();
+        }
+    });
     ipcMain.handle('backup:crear',async()=>{try{const d=await dialog.showSaveDialog(mainWindow,{title:'Guardar respaldo de la base de datos',defaultPath:`RRHH_Control_backup_${new Date().toISOString().slice(0,10)}.db`,filters:[{name:'SQLite',extensions:['db']}]});if(d.canceled||!d.filePath)return {ok:false,cancelado:true};db.pragma('wal_checkpoint(TRUNCATE)');fs.copyFileSync(dbPath,d.filePath);await registrarAuditoria('Respaldo creado','Administración',d.filePath);return {ok:true,path:d.filePath};}catch(error){return {ok:false,error:error.message};}});
     ipcMain.handle('reportes:calendario-vacaciones',async(event,payload={})=>{try{const p=[];let w='';if(payload.empresaId){w='AND e.empresa_id=?';p.push(payload.empresaId);}const data=await dbAll(`SELECT s.id,s.empleado_id,s.fecha_inicio,s.fecha_fin,s.dias_solicitados,s.estado,e.nombre,e.apellido,e.num_empleado FROM solicitudes_vacaciones s JOIN empleados e ON e.id=s.empleado_id WHERE 1=1 ${w} ORDER BY s.fecha_inicio DESC`,p);return {ok:true,data};}catch(error){return {ok:false,error:error.message};}});
 
@@ -1671,7 +1811,8 @@ function registrarHandlersIPC() {
                 fecha_contrato: empleado.fecha_contrato,
                 fecha_vencimiento_contrato: empleado.fecha_vencimiento_contrato,
                 ruta_contrato_pdf: empleado.ruta_contrato_pdf,
-                fecha_nacimiento: empleado.fecha_nacimiento
+                fecha_nacimiento: empleado.fecha_nacimiento,
+                salario_minimo_profesional: empleado.salario_minimo_profesional
             };
             const sets=[]; const params=[];
             for (const [campo,valor] of Object.entries(camposPermitidos)) {
@@ -2810,10 +2951,103 @@ ipcMain.handle('incidencias:obtener-por-empleado', async (event,payload)=>{
             return { ok: false, error: error.message };
         }
     });
-    // V31 - INTEGRACIÓN DE SALARIOS: aplica un incremento (o decremento) porcentual sobre
-    // el salario diario fiscal de uno o varios empleados en una sola operación transaccional.
-    // El nuevo salario_diario queda disponible de inmediato para finiquitos, liquidaciones,
-    // aguinaldos, etc., porque todos esos cálculos leen la columna empleados.salario_diario.
+    // V35 - Configuración general del módulo de Integración de Salarios: ejercicio
+    // (año) sobre el que se calcula, salario mínimo del año anterior y % de incremento
+    // de referencia (equivalentes a las celdas fijas "SM 2025" / "SM 2026 EN %" del
+    // Excel "INTEGRADOS DEFINITIVOS"), editables porque cambian cada año. Se guardan en
+    // configuracion_sistema como clave/valor; se migran automáticamente las claves
+    // legadas sm_2025/sm_2026_pct de instalaciones previas al primer arranque.
+    const CONFIG_SALARIOS_DEFAULT = { ejercicio: new Date().getFullYear(), sm_base: 278.80, incremento_pct: 13 };
+    async function obtenerConfigSalariosInterno() {
+        const filas = await dbAll(`SELECT clave, valor FROM configuracion_sistema WHERE clave IN ('salarios_ejercicio','salarios_sm_base','salarios_incremento_pct','sm_2025','sm_2026_pct')`);
+        const mapa = Object.fromEntries(filas.map(f => [f.clave, f.valor]));
+        const ejercicioLegado = mapa.sm_2026_pct !== undefined ? 2026 : undefined;
+        const ejercicio = Number.isFinite(Number(mapa.salarios_ejercicio)) ? Number(mapa.salarios_ejercicio)
+            : (ejercicioLegado || CONFIG_SALARIOS_DEFAULT.ejercicio);
+        const smBase = Number.isFinite(Number(mapa.salarios_sm_base)) ? Number(mapa.salarios_sm_base)
+            : (Number.isFinite(Number(mapa.sm_2025)) ? Number(mapa.sm_2025) : CONFIG_SALARIOS_DEFAULT.sm_base);
+        const incrementoPct = Number.isFinite(Number(mapa.salarios_incremento_pct)) ? Number(mapa.salarios_incremento_pct)
+            : (Number.isFinite(Number(mapa.sm_2026_pct)) ? Number(mapa.sm_2026_pct) : CONFIG_SALARIOS_DEFAULT.incremento_pct);
+        return { ejercicio, sm_base: smBase, incremento_pct: incrementoPct };
+    }
+
+    ipcMain.handle('salarios:obtener-config', async () => {
+        try { return { ok: true, data: await obtenerConfigSalariosInterno() }; }
+        catch (error) { return { ok: false, error: error.message }; }
+    });
+
+    ipcMain.handle('salarios:guardar-config', async (event, payload = {}) => {
+        try {
+            const actual = await obtenerConfigSalariosInterno();
+            const ejercicio = payload.ejercicio !== undefined ? Number(payload.ejercicio) : actual.ejercicio;
+            const smBase = payload.sm_base !== undefined ? Number(payload.sm_base) : actual.sm_base;
+            const incrementoPct = payload.incremento_pct !== undefined ? Number(payload.incremento_pct) : actual.incremento_pct;
+            if (!Number.isInteger(ejercicio) || ejercicio < 2000 || ejercicio > 2100) return { ok: false, error: 'El ejercicio no es válido.' };
+            if (!Number.isFinite(smBase) || smBase < 0) return { ok: false, error: 'El salario mínimo no es válido.' };
+            if (!Number.isFinite(incrementoPct)) return { ok: false, error: 'El % de incremento no es válido.' };
+            await dbRun(`INSERT INTO configuracion_sistema (clave, valor) VALUES ('salarios_ejercicio', ?) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor`, [String(ejercicio)]);
+            await dbRun(`INSERT INTO configuracion_sistema (clave, valor) VALUES ('salarios_sm_base', ?) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor`, [String(smBase)]);
+            await dbRun(`INSERT INTO configuracion_sistema (clave, valor) VALUES ('salarios_incremento_pct', ?) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor`, [String(incrementoPct)]);
+            await registrarAuditoria('Actualización de configuración', 'Integración de Salarios', `Ejercicio = ${ejercicio}, SM base = ${smBase}, incremento = ${incrementoPct}%`);
+            return { ok: true, data: { ejercicio, sm_base: smBase, incremento_pct: incrementoPct } };
+        } catch (error) {
+            return { ok: false, error: error.message };
+        }
+    });
+
+    // V34 - Plantilla del módulo de Integración de Salarios: para cada empleado calcula,
+    // igual que el Excel "INTEGRADOS DEFINITIVOS" / CONTPAQi, el Salario Diario Integrado
+    // (SDI) a partir del Salario Diario (SD) y el factor de integración según antigüedad
+    // (ver calcularFactorIntegracionSDI). El SDI guardado en empleados.salario_base (si
+    // existe y es mayor a 0) se muestra como "SDI actual"; el calculado con la fórmula
+    // legal se muestra como referencia para aplicar o corregir.
+    ipcMain.handle('salarios:obtener-plantilla', async (event, payload = {}) => {
+        try {
+            const empresaId = payload && typeof payload === 'object' ? Number(payload.empresaId || 0) : Number(payload || 0);
+            const where = ['e.activo = 1'];
+            const params = [];
+            if (empresaId) { where.push('e.empresa_id = ?'); params.push(empresaId); }
+            const rows = await dbAll(`
+                SELECT e.*, em.nombre AS empresa_nombre
+                FROM empleados e
+                LEFT JOIN empresas em ON em.id = e.empresa_id
+                WHERE ${where.join(' AND ')}
+                ORDER BY e.apellido ASC, e.nombre ASC
+            `, params);
+            const hoy = obtenerFechaLocal();
+            const configSalarios = await obtenerConfigSalariosInterno();
+            const data = descifrarCamposEmpleados(rows).map(emp => {
+                const { aniosAntiguedad, diasVacaciones, primaVacacionalDias, factor } = calcularFactorIntegracionSDI(emp.fecha_ingreso, hoy);
+                const salarioDiario = Number(emp.salario_diario || 0);
+                const sdiActual = Number(emp.salario_base || 0);
+                return {
+                    ...emp,
+                    anios_antiguedad_sdi: aniosAntiguedad,
+                    dias_vacaciones_sdi: diasVacaciones,
+                    dias_anio_sdi: 365,
+                    dias_aguinaldo_sdi: SDI_DIAS_AGUINALDO,
+                    prima_vacacional_dias_sdi: +primaVacacionalDias.toFixed(2),
+                    factor_integracion: +factor.toFixed(4),
+                    sdi_calculado: +(salarioDiario * factor).toFixed(2),
+                    sdi_actual: sdiActual,
+                    ejercicio: configSalarios.ejercicio,
+                    sm_base: configSalarios.sm_base,
+                    incremento_pct: configSalarios.incremento_pct,
+                    salario_minimo_profesional: emp.salario_minimo_profesional != null ? Number(emp.salario_minimo_profesional) : null
+                };
+            });
+            return { ok: true, data };
+        } catch (error) {
+            return { ok: false, error: error.message };
+        }
+    });
+
+    // V31/V34 - INTEGRACIÓN DE SALARIOS: aplica un incremento (o decremento) porcentual
+    // sobre el salario diario fiscal de uno o varios empleados en una sola operación
+    // transaccional, y actualiza también su Salario Diario Integrado (SDI/SBC) según el
+    // factor de integración por antigüedad. El nuevo salario_diario/salario_base queda
+    // disponible de inmediato para finiquitos, liquidaciones, aguinaldos, etc., porque
+    // todos esos cálculos leen esas columnas de empleados.
     ipcMain.handle('salarios:aplicar-incremento', async (event, payload = {}) => {
         try {
             const cambios = Array.isArray(payload.cambios) ? payload.cambios : [];
@@ -2823,15 +3057,34 @@ ipcMain.handle('incidencias:obtener-por-empleado', async (event,payload)=>{
             await dbRun('BEGIN TRANSACTION');
             try {
                 let aplicados = 0;
+                const porcentajesAplicados = [];
                 for (const c of cambios) {
                     const id = Number(c.id);
                     const nuevoSalario = Number(c.nuevoSalario);
                     if (!id || !Number.isFinite(nuevoSalario) || nuevoSalario < 0) continue;
-                    const res = await dbRun(`UPDATE empleados SET salario_diario = ? WHERE id = ?`, [nuevoSalario, id]);
-                    if (res.changes > 0) aplicados++;
+                    let nuevoSDI = Number(c.nuevoSDI);
+                    if (!Number.isFinite(nuevoSDI) || nuevoSDI < 0) {
+                        const empleado = await dbGet(`SELECT fecha_ingreso FROM empleados WHERE id=?`, [id]);
+                        const { factor } = calcularFactorIntegracionSDI(empleado && empleado.fecha_ingreso, obtenerFechaLocal());
+                        nuevoSDI = +(nuevoSalario * factor).toFixed(2);
+                    }
+                    const res = await dbRun(`UPDATE empleados SET salario_diario = ?, salario_base = ? WHERE id = ?`, [nuevoSalario, nuevoSDI, id]);
+                    if (res.changes > 0) {
+                        aplicados++;
+                        const pctFila = Number(c.porcentaje);
+                        if (Number.isFinite(pctFila)) porcentajesAplicados.push(pctFila);
+                    }
                 }
                 await dbRun('COMMIT');
-                await registrarAuditoria('Incremento salarial aplicado', 'Integración de Salarios', `${aplicados} empleado(s) · ${porcentaje > 0 ? '+' : ''}${porcentaje}% sobre salario diario fiscal`);
+                // V34 - cada empleado puede llevar un % distinto (criterio del cliente,
+                // p.ej. quienes ya ganan por encima del mínimo reciben un % menor), así
+                // que la bitácora reporta el rango real aplicado en vez de un único %.
+                let detallePct = `${porcentaje > 0 ? '+' : ''}${porcentaje}%`;
+                if (porcentajesAplicados.length) {
+                    const minPct = Math.min(...porcentajesAplicados), maxPct = Math.max(...porcentajesAplicados);
+                    detallePct = minPct === maxPct ? `${minPct > 0 ? '+' : ''}${minPct}%` : `individual por empleado (${minPct}% a ${maxPct}%)`;
+                }
+                await registrarAuditoria('Incremento salarial aplicado', 'Integración de Salarios', `${aplicados} empleado(s) · ${detallePct} sobre salario diario y salario diario integrado`);
                 return { ok: true, aplicados };
             } catch (errInner) {
                 await dbRun('ROLLBACK');

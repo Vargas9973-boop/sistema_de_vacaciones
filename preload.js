@@ -120,7 +120,8 @@ contextBridge.exposeInMainWorld('api', {
     loginAdmin: (datos) => ipcRenderer.invoke('auth:login', datos),
     cambiarPasswordAdmin: (datos) => ipcRenderer.invoke('auth:cambiar-password', datos),
     obtenerResumenDashboard: (empresaId) => ipcRenderer.invoke('dashboard:resumen', empresaId),
-    obtenerAuditoria: () => ipcRenderer.invoke('auditoria:listar'),
+    obtenerAuditoria: (payload) => ipcRenderer.invoke('auditoria:listar', payload),
+    exportarAuditoriaPdf: (payload) => ipcRenderer.invoke('auditoria:exportar-pdf', payload),
     crearRespaldo: () => ipcRenderer.invoke('backup:crear'),
     obtenerCalendarioVacaciones: (payload) => ipcRenderer.invoke('reportes:calendario-vacaciones', payload),
     guardarReporteExcel: (payload) => ipcRenderer.invoke('reportes:guardar-excel', payload),
@@ -129,7 +130,10 @@ contextBridge.exposeInMainWorld('api', {
     // ============================================================================
     // MÓDULO NUEVO: INTEGRACIÓN DE SALARIOS
     // ============================================================================
+    obtenerPlantillaSalarios: (payload) => ipcRenderer.invoke('salarios:obtener-plantilla', payload),
     aplicarIncrementoSalarial: (payload) => ipcRenderer.invoke('salarios:aplicar-incremento', payload),
+    obtenerConfigSalarios: () => ipcRenderer.invoke('salarios:obtener-config'),
+    guardarConfigSalarios: (payload) => ipcRenderer.invoke('salarios:guardar-config', payload),
 
     // ============================================================================
     // MÓDULO NUEVO: COMPLEMENTO CONTPAQI

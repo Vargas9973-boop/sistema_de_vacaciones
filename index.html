@@ -293,12 +293,38 @@
         <div class="admin-grid">
           <div class="card admin-card"><h3><i class="fa-solid fa-user-lock"></i> Usuario administrador</h3><p>El sistema utiliza una sola cuenta con privilegios administrativos.</p><div class="admin-user-row"><strong>admin</strong><span class="badge badge-success">ÚNICA CUENTA</span></div><button id="btnCambiarPasswordAdmin" class="btn btn-primary">Cambiar contraseña</button></div>
           <div class="card admin-card"><h3><i class="fa-solid fa-database"></i> Respaldos</h3><p>Genera una copia segura de la base de datos SQLite.</p><button id="btnCrearBackup" class="btn btn-primary"><i class="fa-solid fa-download"></i> Crear respaldo</button><div id="backupMensaje" class="small-message"></div></div>
+          <div class="card admin-card"><h3><i class="fa-solid fa-calendar-days"></i> Ejercicio fiscal</h3><p>Año de cálculo usado en Integración de Salarios y como referencia para reportes y tablas ISR. Actualízalo al iniciar un nuevo año para que los cálculos no se queden en el ejercicio anterior.</p><div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;"><div><label>Ejercicio en curso</label><input type="number" id="adminEjercicioActual" class="form-control" min="2000" max="2100" step="1" style="max-width:140px;"></div><button id="btnAdminGuardarEjercicio" class="btn btn-primary"><i class="fa-solid fa-floppy-disk"></i> Guardar</button></div><div id="adminEjercicioMensaje" class="small-message"></div></div>
         </div>
         <div class="card">
           <div class="section-title"><h3><i class="fa-solid fa-building"></i> Empresas</h3><button id="btnNuevaEmpresa" class="btn btn-primary"><i class="fa-solid fa-plus"></i> Nueva empresa</button></div>
           <div class="table-responsive"><table class="data-table"><thead><tr><th>Logotipo</th><th>Nombre</th><th>RFC</th><th>Acciones</th></tr></thead><tbody id="tablaEmpresasAdmin"></tbody></table></div>
         </div>
-        <div class="card"><div class="section-title"><h3><i class="fa-solid fa-list-check"></i> Bitácora de auditoría</h3><button id="btnActualizarAuditoria" class="btn btn-secondary">Actualizar</button></div><div class="table-responsive"><table class="data-table"><thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Módulo</th><th>Detalle</th></tr></thead><tbody id="tablaAuditoria"></tbody></table></div></div>
+        <div class="card">
+          <div class="section-title"><h3><i class="fa-solid fa-list-check"></i> Bitácora de auditoría</h3></div>
+          <div style="display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;margin:0 0 14px;">
+            <div>
+              <label style="display:block;font-size:.8rem;color:#64748b;margin-bottom:4px;">Rango rápido</label>
+              <select id="audRangoRapido" class="form-control" style="max-width:170px;">
+                <option value="personalizado">Personalizado</option>
+                <option value="hoy">Hoy</option>
+                <option value="semana">Esta semana</option>
+                <option value="mes">Este mes</option>
+              </select>
+            </div>
+            <div>
+              <label style="display:block;font-size:.8rem;color:#64748b;margin-bottom:4px;">Desde</label>
+              <input type="date" id="audFechaDesde" class="form-control">
+            </div>
+            <div>
+              <label style="display:block;font-size:.8rem;color:#64748b;margin-bottom:4px;">Hasta</label>
+              <input type="date" id="audFechaHasta" class="form-control">
+            </div>
+            <button type="button" id="btnActualizarAuditoria" class="btn btn-secondary"><i class="fa-solid fa-rotate"></i> Actualizar</button>
+            <button type="button" id="btnExportarAuditoriaPdf" class="btn btn-primary"><i class="fa-solid fa-file-pdf"></i> Exportar PDF</button>
+            <span id="audAviso" style="font-size:.85rem;color:#64748b;"></span>
+          </div>
+          <div class="table-responsive"><table class="data-table"><thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Módulo</th><th>Detalle</th></tr></thead><tbody id="tablaAuditoria"></tbody></table></div>
+        </div>
       </section>
 
       <!-- MÓDULO 1: EXPEDIENTE DIGITAL -->
@@ -752,7 +778,7 @@
 
 <!-- MÓDULO NUEVO: INTEGRACIÓN DE SALARIOS -->
 <section id="mod-salarios" class="module-view">
-  <header class="module-header"><h1><i class="fa-solid fa-sack-dollar"></i> Integración de Salarios</h1><p>Aplica incrementos porcentuales al salario diario fiscal. El nuevo valor se usa de inmediato en finiquitos, liquidaciones y aguinaldos.</p></header>
+  <header class="module-header"><h1><i class="fa-solid fa-sack-dollar"></i> Integración de Salarios</h1><p>Aplica incrementos porcentuales al salario diario (SD) y calcula automáticamente el Salario Diario Integrado (SDI) con el factor de integración por antigüedad, igual que CONTPAQi. Los nuevos valores se usan de inmediato en finiquitos, liquidaciones y aguinaldos.</p></header>
   <div class="module-body">
 
     <div class="card" style="padding:18px;margin-bottom:20px;">
@@ -767,13 +793,35 @@
       </div>
     </div>
 
+    <div class="card" style="padding:18px;margin-bottom:20px;">
+      <h3 style="margin-top:0;"><i class="fa-solid fa-gear"></i> Referencias generales</h3>
+      <p style="margin:0 0 12px;font-size:.85rem;color:#64748b;" id="salConfigHint">Ejercicio (año) sobre el que se calcula, salario mínimo del año anterior y % de incremento de referencia. Se usan como columnas de referencia en la tabla de abajo; actualízalos cada año para futuros cálculos.</p>
+      <div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;">
+        <div>
+          <label>Ejercicio</label>
+          <input type="number" id="salEjercicio" class="form-control" min="2000" max="2100" step="1" style="max-width:120px;">
+        </div>
+        <div>
+          <label id="salLabelSMBase">SM año anterior (salario mínimo)</label>
+          <input type="number" id="salConfigSMBase" class="form-control" step="0.01" min="0" style="max-width:180px;">
+        </div>
+        <div>
+          <label id="salLabelIncrementoPct">% de incremento de referencia</label>
+          <input type="number" id="salConfigIncrementoPct" class="form-control" step="0.01" style="max-width:220px;">
+        </div>
+        <button type="button" id="btnSalGuardarConfig" class="btn btn-secondary"><i class="fa-solid fa-floppy-disk"></i> Guardar</button>
+        <span id="salConfigMensaje" style="font-size:.88rem;color:#64748b;"></span>
+      </div>
+    </div>
+
     <!-- Panel comparativo: se muestra tras "Comparar impacto de selección" -->
     <div class="card" id="salPanelComparativo" style="padding:18px;margin-bottom:20px;display:none;border:1px solid #99f6e4;background:#f0fdfa;">
       <h3 style="margin-top:0;"><i class="fa-solid fa-scale-balanced"></i> Comparativa del incremento</h3>
+      <p style="margin:0 0 12px;font-size:.85rem;color:#64748b;">El % de arriba se usa como valor inicial para todos los seleccionados. Ajusta el % de cada empleado abajo si algunos deben llevar un incremento distinto (por ejemplo, quienes ya ganan por encima del mínimo).</p>
       <div class="table-responsive">
         <table class="table" style="width:100%;border-collapse:collapse;">
           <thead><tr style="background:#f1f5f9;text-align:left;">
-            <th>Empleado</th><th>Empresa</th><th>Salario diario actual</th><th>Salario diario nuevo</th><th>Diferencia diaria</th><th>Salario mensual actual</th><th>Salario mensual nuevo</th>
+            <th>Empleado</th><th>Empresa</th><th>SD actual</th><th>% individual</th><th>SD nuevo</th><th>Diferencia diaria</th><th>Factor integración</th><th>SDI actual</th><th>SDI nuevo</th>
           </tr></thead>
           <tbody id="salTablaComparativa"></tbody>
         </table>
@@ -789,6 +837,7 @@
         <h3 style="margin:0;"><i class="fa-solid fa-table-list"></i> Plantilla de empleados</h3>
         <input type="text" id="salBuscarEmpleado" class="form-control" placeholder="Buscar por nombre..." style="max-width:260px;">
       </div>
+      <div class="table-responsive">
       <table class="table" style="width:100%;border-collapse:collapse;margin-top:15px;">
         <thead>
           <tr style="background:#f1f5f9;text-align:left;">
@@ -796,14 +845,23 @@
             <th>ID</th>
             <th>Nombre completo</th>
             <th>Empresa</th>
-            <th>Salario diario fiscal</th>
             <th>Fecha de ingreso</th>
-            <th>Antigüedad</th>
-            <th>Salario (× 30)</th>
+            <th title="Años cumplidos + 1, igual que Finiquitos">AÑOS ANTIGÜEDAD</th>
+            <th>DÍAS VACACIONES</th>
+            <th>DÍAS AÑO</th>
+            <th>DÍAS AGUINALDO</th>
+            <th>PRIMA VACACIONAL</th>
+            <th>FACTOR INTEGRACIÓN</th>
+            <th id="thSMBase">SM</th>
+            <th id="thIncrementoPct">% INCREMENTO</th>
+            <th title="Salario mínimo profesional del puesto (captura manual)">SALARIO PROFESIONAL</th>
+            <th>SD</th>
+            <th>SDI</th>
           </tr>
         </thead>
         <tbody id="tablaSalarios"></tbody>
       </table>
+      </div>
     </div>
   </div>
 </section>

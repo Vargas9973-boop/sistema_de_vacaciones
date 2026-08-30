@@ -2494,7 +2494,7 @@ function configurarModuloFiniquitosV23() {
     }
     const btnImportISR=document.getElementById('btnImportarTablaISRV26');
     const inputEjercicioISR=document.getElementById('ejercicioTablaISRV26');
-    if(inputEjercicioISR && !inputEjercicioISR.value) inputEjercicioISR.value=String(new Date().getFullYear());
+    if(inputEjercicioISR && !inputEjercicioISR.value) inputEjercicioISR.value=String(window.__salariosConfig?.ejercicio||new Date().getFullYear());
     if(btnImportISR && !btnImportISR.dataset.v23Ready){
         btnImportISR.dataset.v23Ready='1';
         btnImportISR.addEventListener('click',async()=>{
@@ -3362,38 +3362,85 @@ function formatearMonedaMX(valor){
 
 window.__salariosCache = window.__salariosCache || [];
 window.__salariosComparativaPendiente = window.__salariosComparativaPendiente || null;
+window.__salariosConfig = window.__salariosConfig || { ejercicio: new Date().getFullYear(), sm_base: 278.80, incremento_pct: 13 };
+
+const SALARIOS_COLSPAN = 16;
+
+// V36 - Etiquetas dinámicas del ejercicio: reemplazan los textos fijos "SM 2025" /
+// "SM 2026 EN %" para que al cambiar de año no se queden con la fecha anterior.
+function actualizarEtiquetasEjercicioSalarios(ejercicio){
+    const ej=Number(ejercicio)||new Date().getFullYear();
+    const lblSM=document.getElementById('salLabelSMBase');
+    const lblPct=document.getElementById('salLabelIncrementoPct');
+    const thSM=document.getElementById('thSMBase');
+    const thPct=document.getElementById('thIncrementoPct');
+    if(lblSM) lblSM.textContent=`SM ${ej-1} (salario mínimo)`;
+    if(lblPct) lblPct.textContent=`% de incremento para ${ej}`;
+    if(thSM) thSM.textContent=`SM ${ej-1}`;
+    if(thPct) thPct.textContent=`${ej} EN %`;
+}
+
+async function cargarConfigSalarios(){
+    try{
+        const res=await window.api.obtenerConfigSalarios();
+        if(res&&res.ok&&res.data){
+            window.__salariosConfig=res.data;
+            const inEjercicio=document.getElementById('salEjercicio');
+            const inSMBase=document.getElementById('salConfigSMBase');
+            const inIncremento=document.getElementById('salConfigIncrementoPct');
+            if(inEjercicio) inEjercicio.value=res.data.ejercicio;
+            if(inSMBase) inSMBase.value=res.data.sm_base;
+            if(inIncremento) inIncremento.value=res.data.incremento_pct;
+            actualizarEtiquetasEjercicioSalarios(res.data.ejercicio);
+        }
+    }catch(e){
+        console.error('Config salarios:',e);
+    }
+}
 
 async function cargarPlantillaSalarios(){
     const tbody=document.getElementById('tablaSalarios');
     if(!tbody) return;
-    if(!window.empresaSeleccionadaId){ tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#64748b;">Selecciona una empresa.</td></tr>'; return; }
-    tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#64748b;">Cargando...</td></tr>';
+    if(!window.empresaSeleccionadaId){ tbody.innerHTML=`<tr><td colspan="${SALARIOS_COLSPAN}" style="text-align:center;color:#64748b;">Selecciona una empresa.</td></tr>`; return; }
+    tbody.innerHTML=`<tr><td colspan="${SALARIOS_COLSPAN}" style="text-align:center;color:#64748b;">Cargando...</td></tr>`;
     try{
-        const res=await window.api.obtenerEmpleadosPorEmpresa(window.empresaSeleccionadaId);
+        await cargarConfigSalarios();
+        const res=await window.api.obtenerPlantillaSalarios({empresaId:window.empresaSeleccionadaId});
         const lista=(res&&res.ok)?res.data:(Array.isArray(res)?res:[]);
         window.__salariosCache=lista;
         renderizarTablaSalarios(lista);
     }catch(e){
         console.error('Salarios:',e);
-        tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#b91c1c;">Error al cargar la plantilla.</td></tr>';
+        tbody.innerHTML=`<tr><td colspan="${SALARIOS_COLSPAN}" style="text-align:center;color:#b91c1c;">Error al cargar la plantilla.</td></tr>`;
     }
 }
 
 function renderizarTablaSalarios(lista){
     const tbody=document.getElementById('tablaSalarios');
     if(!tbody) return;
-    if(!lista || !lista.length){ tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#64748b;">Sin empleados registrados.</td></tr>'; return; }
+    if(!lista || !lista.length){ tbody.innerHTML=`<tr><td colspan="${SALARIOS_COLSPAN}" style="text-align:center;color:#64748b;">Sin empleados registrados.</td></tr>`; return; }
     tbody.innerHTML=lista.map(emp=>{
         const salarioDiario=Number(emp.salario_diario||0);
+        const factor=Number(emp.factor_integracion||1);
+        const sdi=Number(emp.sdi_actual||0)>0?Number(emp.sdi_actual):Number(emp.sdi_calculado||0);
+        const profesionales=emp.salario_minimo_profesional;
         return `<tr data-empleado-id="${emp.id}">
             <td><input type="checkbox" class="sal-check-empleado" value="${emp.id}"></td>
             <td>${emp.id}</td>
             <td>${escapeHtml(`${emp.nombre||''} ${emp.apellido||''}`.trim())}</td>
             <td>${escapeHtml(emp.empresa_nombre||'')}</td>
-            <td>${formatearMonedaMX(salarioDiario)}</td>
             <td>${escapeHtml(emp.fecha_ingreso||'')}</td>
-            <td><span class="badge badge-info">${calcularAntiguedad(emp.fecha_ingreso)}</span></td>
-            <td><strong>${formatearMonedaMX(salarioDiario*30)}</strong></td>
+            <td><span class="badge badge-info">${Number(emp.anios_antiguedad_sdi||0)}</span></td>
+            <td>${Number(emp.dias_vacaciones_sdi||0)}</td>
+            <td>${Number(emp.dias_anio_sdi||365)}</td>
+            <td>${Number(emp.dias_aguinaldo_sdi||0)}</td>
+            <td>${Number(emp.prima_vacacional_dias_sdi||0)}</td>
+            <td>${factor.toFixed(4)}</td>
+            <td>${formatearMonedaMX(Number(emp.sm_base||0))}</td>
+            <td>${Number(emp.incremento_pct||0).toFixed(2)}%</td>
+            <td><input type="number" class="form-control sal-profesional-input" data-id="${emp.id}" value="${profesionales!=null?profesionales:''}" step="0.01" min="0" placeholder="—" style="max-width:100px;"></td>
+            <td>${formatearMonedaMX(salarioDiario)}</td>
+            <td><strong>${formatearMonedaMX(sdi)}</strong></td>
         </tr>`;
     }).join('');
 }
@@ -3404,20 +3451,31 @@ function filtrarListaPorNombre(lista,texto){
     return lista.filter(emp=>`${emp.nombre||''} ${emp.apellido||''}`.trim().toLowerCase().includes(q));
 }
 
+// Recalcula SD nuevo / SDI nuevo de una fila a partir de su % individual y
+// actualiza el objeto en window.__salariosComparativaPendiente (mutación in-place
+// para no perder el foco del input al re-renderizar toda la tabla).
+function recalcularFilaComparativaSalarios(fila){
+    fila.nuevo=+(fila.actual*(1+fila.porcentaje/100)).toFixed(2);
+    fila.sdiNuevo=+(fila.nuevo*fila.factor).toFixed(2);
+    return fila;
+}
+
 function renderizarComparativaSalarios(filas){
     const tbody=document.getElementById('salTablaComparativa');
     if(!tbody) return;
     tbody.innerHTML=filas.map(f=>{
         const diferencia=f.nuevo-f.actual;
         const colorDif=diferencia>=0?'#16a34a':'#b91c1c';
-        return `<tr>
+        return `<tr data-fila-id="${f.id}">
             <td>${escapeHtml(f.nombre)}</td>
             <td>${escapeHtml(f.empresa)}</td>
             <td>${formatearMonedaMX(f.actual)}</td>
-            <td><strong style="color:#0f766e;">${formatearMonedaMX(f.nuevo)}</strong></td>
-            <td style="color:${colorDif};font-weight:600;">${diferencia>=0?'+':''}${formatearMonedaMX(diferencia)}</td>
-            <td>${formatearMonedaMX(f.actual*30)}</td>
-            <td><strong>${formatearMonedaMX(f.nuevo*30)}</strong></td>
+            <td><input type="number" class="form-control sal-pct-fila" data-id="${f.id}" value="${f.porcentaje}" step="0.01" style="max-width:100px;"></td>
+            <td><strong class="sal-celda-nuevo" style="color:#0f766e;">${formatearMonedaMX(f.nuevo)}</strong></td>
+            <td class="sal-celda-dif" style="color:${colorDif};font-weight:600;">${diferencia>=0?'+':''}${formatearMonedaMX(diferencia)}</td>
+            <td>${f.factor.toFixed(4)}</td>
+            <td>${formatearMonedaMX(f.sdiActual)}</td>
+            <td><strong class="sal-celda-sdi-nuevo" style="color:#0f766e;">${formatearMonedaMX(f.sdiNuevo)}</strong></td>
         </tr>`;
     }).join('');
 }
@@ -3441,6 +3499,45 @@ function configurarModuloSalarios(){
         document.querySelectorAll('.sal-check-empleado').forEach(cb=>{cb.checked=e.target.checked;});
     });
 
+    document.getElementById('btnSalGuardarConfig')?.addEventListener('click',async()=>{
+        const mensaje=document.getElementById('salConfigMensaje');
+        const ejercicio=parseInt(document.getElementById('salEjercicio')?.value,10);
+        const smBase=parseFloat(document.getElementById('salConfigSMBase')?.value);
+        const incrementoPct=parseFloat(document.getElementById('salConfigIncrementoPct')?.value);
+        if(!Number.isInteger(ejercicio)||ejercicio<2000||ejercicio>2100||!Number.isFinite(smBase)||smBase<0||!Number.isFinite(incrementoPct)){
+            if(mensaje){ mensaje.textContent='Ingresa valores válidos.'; mensaje.style.color='#b91c1c'; }
+            return;
+        }
+        try{
+            const res=await window.api.guardarConfigSalarios({ejercicio,sm_base:smBase,incremento_pct:incrementoPct});
+            if(!res?.ok) throw new Error(res?.error||'No se pudo guardar la configuración.');
+            window.__salariosConfig=res.data;
+            actualizarEtiquetasEjercicioSalarios(res.data.ejercicio);
+            if(mensaje){ mensaje.textContent='Guardado.'; mensaje.style.color='#16a34a'; }
+            await cargarPlantillaSalarios();
+        }catch(e){
+            if(mensaje){ mensaje.textContent=e.message; mensaje.style.color='#b91c1c'; }
+        }
+    });
+
+    // Columna PROFESIONALES: captura manual del salario mínimo profesional del
+    // puesto (catálogo CONASAMI); se guarda por empleado al salir del campo.
+    document.getElementById('tablaSalarios')?.addEventListener('change',async(e)=>{
+        const input=e.target.closest('.sal-profesional-input');
+        if(!input) return;
+        const id=Number(input.dataset.id);
+        const valor=input.value.trim()==='' ? null : parseFloat(input.value);
+        if(valor!==null && (!Number.isFinite(valor)||valor<0)){ input.value=''; return; }
+        try{
+            const res=await window.api.actualizarEmpleado({id,salario_minimo_profesional:valor});
+            if(!res?.ok) throw new Error(res?.error||'No se pudo guardar.');
+            const fila=(window.__salariosCache||[]).find(emp=>Number(emp.id)===id);
+            if(fila) fila.salario_minimo_profesional=valor;
+        }catch(err){
+            mostrarNotificacionLocal(`Error al guardar profesionales: ${err.message}`,'error');
+        }
+    });
+
     document.getElementById('btnSalCompararIncremento')?.addEventListener('click',()=>{
         const porcentaje=parseFloat(document.getElementById('salPorcentajeIncremento')?.value);
         if(!Number.isFinite(porcentaje)||porcentaje===0){
@@ -3456,12 +3553,37 @@ function configurarModuloSalarios(){
         const filas=window.__salariosCache.filter(emp=>seleccionados.includes(Number(emp.id)));
         window.__salariosComparativaPendiente=filas.map(emp=>{
             const actual=Number(emp.salario_diario||0);
-            const nuevo=+(actual*(1+porcentaje/100)).toFixed(2);
-            return {id:emp.id,nombre:`${emp.nombre||''} ${emp.apellido||''}`.trim(),empresa:emp.empresa_nombre||'',actual,nuevo};
+            const factor=Number(emp.factor_integracion||1);
+            const sdiActual=Number(emp.sdi_actual||0)>0?Number(emp.sdi_actual):Number(emp.sdi_calculado||0);
+            const fila={id:emp.id,nombre:`${emp.nombre||''} ${emp.apellido||''}`.trim(),empresa:emp.empresa_nombre||'',actual,porcentaje,factor,sdiActual,nuevo:0,sdiNuevo:0};
+            return recalcularFilaComparativaSalarios(fila);
         });
         renderizarComparativaSalarios(window.__salariosComparativaPendiente);
         const panel=document.getElementById('salPanelComparativo');
         if(panel){ panel.style.display='block'; panel.scrollIntoView({behavior:'smooth',block:'start'}); }
+    });
+
+    // % individual por fila: cada empleado puede llevar un incremento distinto al
+    // global (p.ej. quienes ya ganan por encima del mínimo reciben un % menor).
+    document.getElementById('salTablaComparativa')?.addEventListener('input',(e)=>{
+        const input=e.target.closest('.sal-pct-fila');
+        if(!input) return;
+        const id=Number(input.dataset.id);
+        const fila=(window.__salariosComparativaPendiente||[]).find(f=>Number(f.id)===id);
+        if(!fila) return;
+        const nuevoPct=parseFloat(input.value);
+        fila.porcentaje=Number.isFinite(nuevoPct)?nuevoPct:0;
+        recalcularFilaComparativaSalarios(fila);
+        const tr=input.closest('tr');
+        if(!tr) return;
+        const diferencia=fila.nuevo-fila.actual;
+        const colorDif=diferencia>=0?'#16a34a':'#b91c1c';
+        const celdaNuevo=tr.querySelector('.sal-celda-nuevo');
+        const celdaDif=tr.querySelector('.sal-celda-dif');
+        const celdaSdiNuevo=tr.querySelector('.sal-celda-sdi-nuevo');
+        if(celdaNuevo) celdaNuevo.textContent=formatearMonedaMX(fila.nuevo);
+        if(celdaDif){ celdaDif.textContent=`${diferencia>=0?'+':''}${formatearMonedaMX(diferencia)}`; celdaDif.style.color=colorDif; }
+        if(celdaSdiNuevo) celdaSdiNuevo.textContent=formatearMonedaMX(fila.sdiNuevo);
     });
 
     document.getElementById('btnSalCancelarIncremento')?.addEventListener('click',()=>{
@@ -3473,16 +3595,16 @@ function configurarModuloSalarios(){
     document.getElementById('btnSalConfirmarIncremento')?.addEventListener('click',async()=>{
         const pendientes=window.__salariosComparativaPendiente;
         if(!pendientes || !pendientes.length) return;
-        const ok=await showConfirm(`¿Aplicar el nuevo salario diario fiscal a ${pendientes.length} empleado(s)? Esta acción no se puede deshacer.`, 'Confirmar');
+        const ok=await showConfirm(`¿Aplicar el nuevo salario diario (SD) y salario diario integrado (SDI) a ${pendientes.length} empleado(s)? Esta acción no se puede deshacer.`, 'Confirmar');
         if(!ok) return;
         const btn=document.getElementById('btnSalConfirmarIncremento');
         if(btn) btn.disabled=true;
         try{
-            const cambios=pendientes.map(f=>({id:f.id,nuevoSalario:f.nuevo}));
+            const cambios=pendientes.map(f=>({id:f.id,nuevoSalario:f.nuevo,nuevoSDI:f.sdiNuevo,porcentaje:f.porcentaje}));
             const porcentaje=parseFloat(document.getElementById('salPorcentajeIncremento')?.value)||0;
             const res=await window.api.aplicarIncrementoSalarial({cambios,porcentaje});
             if(res && res.ok){
-                mostrarNotificacionLocal(`Incremento aplicado a ${res.aplicados} empleado(s). El nuevo salario diario fiscal ya está disponible para finiquitos, liquidaciones y aguinaldos.`,'success');
+                mostrarNotificacionLocal(`Incremento aplicado a ${res.aplicados} empleado(s). El nuevo SD y SDI ya están disponibles para finiquitos, liquidaciones y aguinaldos.`,'success');
                 const panel=document.getElementById('salPanelComparativo');
                 if(panel) panel.style.display='none';
                 window.__salariosComparativaPendiente=null;
@@ -3864,7 +3986,45 @@ function configurarAdministracionProfesional(){
     document.getElementById('btnCerrarPassword')?.addEventListener('click',cerrarModalPassword);
     document.getElementById('btnGuardarPassword')?.addEventListener('click',async()=>{const msg=document.getElementById('passwordMensaje'),a=document.getElementById('passwordActual').value,n=document.getElementById('passwordNueva').value,n2=document.getElementById('passwordNueva2').value;if(n!==n2){msg.textContent='Las contraseñas nuevas no coinciden.';return;}const r=await window.api.cambiarPasswordAdmin({actual:a,nueva:n});if(!r.ok){msg.textContent=r.error||'No se pudo cambiar la contraseña.';return;}msg.style.color='#0f766e';msg.textContent='Contraseña actualizada correctamente.';setTimeout(cerrarModalPassword,700);});
     document.getElementById('btnCrearBackup')?.addEventListener('click',async()=>{const el=document.getElementById('backupMensaje');const r=await window.api.crearRespaldo();el.textContent=r.ok?'Respaldo creado correctamente.':(r.cancelado?'Operación cancelada.':(r.error||'Error al crear respaldo.'));cargarAuditoriaProfesional();});
+
+    // V36 - Ejercicio fiscal en curso: mismo valor que en Integración de Salarios,
+    // editable también aquí para que Administración fije el año de trabajo.
+    (async()=>{
+        const inputEjercicio=document.getElementById('adminEjercicioActual');
+        if(!inputEjercicio) return;
+        try{
+            const res=await window.api.obtenerConfigSalarios();
+            if(res?.ok&&res.data){ window.__salariosConfig=res.data; inputEjercicio.value=res.data.ejercicio; }
+        }catch(e){ console.error('Ejercicio admin:',e); }
+    })();
+    document.getElementById('btnAdminGuardarEjercicio')?.addEventListener('click',async()=>{
+        const mensaje=document.getElementById('adminEjercicioMensaje');
+        const inputEjercicio=document.getElementById('adminEjercicioActual');
+        const ejercicio=parseInt(inputEjercicio?.value,10);
+        if(!Number.isInteger(ejercicio)||ejercicio<2000||ejercicio>2100){
+            if(mensaje){ mensaje.textContent='Ingresa un ejercicio válido.'; mensaje.style.color='#b91c1c'; }
+            return;
+        }
+        try{
+            const res=await window.api.guardarConfigSalarios({ejercicio});
+            if(!res?.ok) throw new Error(res?.error||'No se pudo guardar el ejercicio.');
+            window.__salariosConfig=res.data;
+            actualizarEtiquetasEjercicioSalarios(res.data.ejercicio);
+            const inSalEjercicio=document.getElementById('salEjercicio');
+            if(inSalEjercicio) inSalEjercicio.value=res.data.ejercicio;
+            if(mensaje){ mensaje.textContent='Ejercicio actualizado.'; mensaje.style.color='#16a34a'; }
+        }catch(e){
+            if(mensaje){ mensaje.textContent=e.message; mensaje.style.color='#b91c1c'; }
+        }
+    });
     document.getElementById('btnActualizarAuditoria')?.addEventListener('click',cargarAuditoriaProfesional);document.querySelectorAll('.nav-item[data-target="mod-admin"]').forEach(x=>x.addEventListener('click',cargarAuditoriaProfesional));
+    document.getElementById('audRangoRapido')?.addEventListener('change',()=>aplicarRangoRapidoAuditoria(true));
+    const marcarRangoPersonalizado=()=>{ const sel=document.getElementById('audRangoRapido'); if(sel) sel.value='personalizado'; cargarAuditoriaProfesional(); };
+    document.getElementById('audFechaDesde')?.addEventListener('change',marcarRangoPersonalizado);
+    document.getElementById('audFechaHasta')?.addEventListener('change',marcarRangoPersonalizado);
+    document.getElementById('btnExportarAuditoriaPdf')?.addEventListener('click',exportarAuditoriaPdfProfesional);
+    const selRangoAuditoria=document.getElementById('audRangoRapido');
+    if(selRangoAuditoria){ selRangoAuditoria.value='mes'; aplicarRangoRapidoAuditoria(false); }
 
     document.getElementById('btnNuevaEmpresa')?.addEventListener('click',()=>abrirModalEmpresa(null));
     document.getElementById('btnCerrarModalEmpresa')?.addEventListener('click',cerrarModalEmpresa);
@@ -3893,7 +4053,80 @@ function configurarAdministracionProfesional(){
         document.getElementById('btnQuitarLogoEmpresa').style.display='none';
     });
 }
-async function cargarAuditoriaProfesional(){try{const r=await window.api.obtenerAuditoria();const data=r?.data||[];document.getElementById('tablaAuditoria').innerHTML=data.map(x=>`<tr><td>${escapeHtml(x.fecha||'')}</td><td>${escapeHtml(x.usuario||'')}</td><td>${escapeHtml(x.accion||'')}</td><td>${escapeHtml(x.modulo||'')}</td><td>${escapeHtml(x.detalle||'')}</td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;padding:25px">Sin movimientos registrados.</td></tr>';}catch(e){console.error(e);}}
+// ==========================================
+// V35 - AUDITORÍA: filtro por rango de fechas + exportación a PDF
+// ==========================================
+function calcularRangoFechasAuditoria(tipo){
+    const hoy=new Date();
+    const pad=n=>String(n).padStart(2,'0');
+    const fmt=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    if(tipo==='hoy') return {desde:fmt(hoy),hasta:fmt(hoy)};
+    if(tipo==='semana'){
+        const diaSemana=hoy.getDay();
+        const offsetLunes=diaSemana===0?6:diaSemana-1;
+        const lunes=new Date(hoy); lunes.setDate(hoy.getDate()-offsetLunes);
+        const domingo=new Date(lunes); domingo.setDate(lunes.getDate()+6);
+        return {desde:fmt(lunes),hasta:fmt(domingo)};
+    }
+    if(tipo==='mes'){
+        const primero=new Date(hoy.getFullYear(),hoy.getMonth(),1);
+        const ultimo=new Date(hoy.getFullYear(),hoy.getMonth()+1,0);
+        return {desde:fmt(primero),hasta:fmt(ultimo)};
+    }
+    return null;
+}
+
+function aplicarRangoRapidoAuditoria(recargar=true){
+    const tipo=document.getElementById('audRangoRapido')?.value;
+    const rango=calcularRangoFechasAuditoria(tipo);
+    if(rango){
+        const dDesde=document.getElementById('audFechaDesde'), dHasta=document.getElementById('audFechaHasta');
+        if(dDesde) dDesde.value=rango.desde;
+        if(dHasta) dHasta.value=rango.hasta;
+    }
+    if(recargar) cargarAuditoriaProfesional();
+}
+
+async function cargarAuditoriaProfesional(){
+    try{
+        const fechaInicio=document.getElementById('audFechaDesde')?.value||'';
+        const fechaFin=document.getElementById('audFechaHasta')?.value||'';
+        const r=await window.api.obtenerAuditoria({fechaInicio,fechaFin});
+        const data=r?.data||[];
+        document.getElementById('tablaAuditoria').innerHTML=data.map(x=>`<tr><td>${escapeHtml(x.fecha||'')}</td><td>${escapeHtml(x.usuario||'')}</td><td>${escapeHtml(x.accion||'')}</td><td>${escapeHtml(x.modulo||'')}</td><td>${escapeHtml(x.detalle||'')}</td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;padding:25px">Sin movimientos registrados en el rango seleccionado.</td></tr>';
+    }catch(e){console.error(e);}
+}
+
+async function exportarAuditoriaPdfProfesional(){
+    const aviso=document.getElementById('audAviso');
+    const mostrarAviso=(texto,color)=>{ if(aviso){ aviso.textContent=texto; aviso.style.color=color; } };
+    const fechaInicio=document.getElementById('audFechaDesde')?.value||'';
+    const fechaFin=document.getElementById('audFechaHasta')?.value||'';
+    if(!fechaInicio||!fechaFin){
+        mostrarAviso('Selecciona un rango de fechas (desde y hasta) antes de exportar.','#b91c1c');
+        return;
+    }
+    const etiquetas={hoy:'Hoy',semana:'Esta semana',mes:'Este mes',personalizado:'Personalizado'};
+    const etiquetaRango=etiquetas[document.getElementById('audRangoRapido')?.value]||'Personalizado';
+    const btn=document.getElementById('btnExportarAuditoriaPdf');
+    if(btn) btn.disabled=true;
+    mostrarAviso('Generando PDF...','#64748b');
+    try{
+        const res=await window.api.exportarAuditoriaPdf({fechaInicio,fechaFin,etiquetaRango});
+        if(res?.ok){
+            mostrarAviso('PDF guardado correctamente.','#16a34a');
+        }else if(!res?.cancelado){
+            mostrarAviso(res?.error||'No fue posible generar el PDF.','#b91c1c');
+        }else{
+            mostrarAviso('','#64748b');
+        }
+    }catch(e){
+        console.error('Exportar auditoría PDF:',e);
+        mostrarAviso('Error al generar el PDF: '+e.message,'#b91c1c');
+    }finally{
+        if(btn) btn.disabled=false;
+    }
+}
 
 // ==========================================
 // ADMINISTRACIÓN: CRUD de empresas
